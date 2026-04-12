@@ -1,0 +1,651 @@
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+
+export const users = sqliteTable("users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  username: text("username").notNull().unique(),
+  email: text("email").notNull().unique(),
+  password: text("password").notNull(),
+  credits: real("credits").notNull().default(0),
+  plan: text("plan").notNull().default("free"),
+  role: text("role").notNull().default("user"), // user, admin
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export const apiKeys = sqliteTable("api_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  name: text("name").notNull(),
+  key: text("key").notNull().unique(),
+  prefix: text("prefix").notNull(),
+  lastUsedAt: text("last_used_at"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+});
+
+export const conversations = sqliteTable("conversations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  title: text("title").notNull().default("New Conversation"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export const messages = sqliteTable("messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  conversationId: integer("conversation_id").notNull(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  model: text("model"),
+  provider: text("provider"), // perplexity, openai, anthropic, google
+  creditsUsed: real("credits_used").default(0),
+  citations: text("citations"),
+  // Agent features
+  toolUsed: text("tool_used"), // "search", "document", "code", null
+  attachments: text("attachments"), // JSON array of generated file refs
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export const usageLogs = sqliteTable("usage_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  apiKeyId: integer("api_key_id"),
+  model: text("model").notNull(),
+  provider: text("provider").notNull().default("perplexity"),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  creditsUsed: real("credits_used").notNull(),
+  endpoint: text("endpoint").notNull(),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+// Platform settings (admin-configurable)
+export const platformSettings = sqliteTable("platform_settings", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  key: text("key").notNull().unique(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+
+export type PlatformSetting = typeof platformSettings.$inferSelect;
+
+// Rate limit rules (admin-configurable)
+export const rateLimitRules = sqliteTable("rate_limit_rules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  plan: text("plan").notNull().default("all"), // "free", "starter", "pro", "enterprise", "all"
+  maxRequestsPerMinute: integer("max_requests_per_minute").notNull().default(10),
+  maxRequestsPerHour: integer("max_requests_per_hour").notNull().default(100),
+  maxRequestsPerDay: integer("max_requests_per_day").notNull().default(500),
+  maxCreditsPerDay: real("max_credits_per_day").notNull().default(100),
+  maxTokensPerRequest: integer("max_tokens_per_request").notNull().default(4096),
+  cooldownSeconds: integer("cooldown_seconds").notNull().default(0), // forced wait between requests
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type RateLimitRule = typeof rateLimitRules.$inferSelect;
+
+export const insertRateLimitRuleSchema = createInsertSchema(rateLimitRules).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertRateLimitRule = z.infer<typeof insertRateLimitRuleSchema>;
+
+// Default platform settings
+export const DEFAULT_SETTINGS = {
+  margin_multiplier: "2",    // 2x = user pays double the base cost
+  smart_followups_enabled: "true",  // auto-suggest follow-up questions
+  agent_tools_enabled: "true",      // enable agent tool capabilities
+  followup_model: "sonar",          // cheap model used for generating follow-ups
+  max_followups: "3",               // number of follow-up suggestions per response
+} as const;
+
+// Default rate limit rules per plan
+export const DEFAULT_RATE_LIMITS: Record<string, {
+  maxRequestsPerMinute: number;
+  maxRequestsPerHour: number;
+  maxRequestsPerDay: number;
+  maxCreditsPerDay: number;
+  maxTokensPerRequest: number;
+  cooldownSeconds: number;
+}> = {
+  free: {
+    maxRequestsPerMinute: 3,
+    maxRequestsPerHour: 20,
+    maxRequestsPerDay: 50,
+    maxCreditsPerDay: 10,
+    maxTokensPerRequest: 2048,
+    cooldownSeconds: 5,
+  },
+  starter: {
+    maxRequestsPerMinute: 10,
+    maxRequestsPerHour: 100,
+    maxRequestsPerDay: 500,
+    maxCreditsPerDay: 100,
+    maxTokensPerRequest: 4096,
+    cooldownSeconds: 2,
+  },
+  pro: {
+    maxRequestsPerMinute: 30,
+    maxRequestsPerHour: 300,
+    maxRequestsPerDay: 2000,
+    maxCreditsPerDay: 500,
+    maxTokensPerRequest: 8192,
+    cooldownSeconds: 0,
+  },
+  enterprise: {
+    maxRequestsPerMinute: 60,
+    maxRequestsPerHour: 1000,
+    maxRequestsPerDay: 10000,
+    maxCreditsPerDay: 5000,
+    maxTokensPerRequest: 16384,
+    cooldownSeconds: 0,
+  },
+};
+
+// Provider API keys stored by admin
+export const providerKeys = sqliteTable("provider_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  provider: text("provider").notNull().unique(), // perplexity, openai, anthropic, google
+  apiKey: text("api_key").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+// Insert schemas
+export const insertUserSchema = createInsertSchema(users).pick({
+  username: true,
+  email: true,
+  password: true,
+});
+
+export const insertApiKeySchema = createInsertSchema(apiKeys).pick({
+  name: true,
+});
+
+export const insertConversationSchema = createInsertSchema(conversations).pick({
+  title: true,
+});
+
+export const insertMessageSchema = createInsertSchema(messages).pick({
+  role: true,
+  content: true,
+  model: true,
+});
+
+// Types
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof users.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type Conversation = typeof conversations.$inferSelect;
+export type Message = typeof messages.$inferSelect;
+export type UsageLog = typeof usageLogs.$inferSelect;
+export type ProviderKey = typeof providerKeys.$inferSelect;
+
+// Helper: apply margin to base cost
+export function applyMargin(baseCost: number, multiplier: number): number {
+  return Math.round(baseCost * multiplier * 100) / 100;
+}
+
+// Login schema
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+});
+
+// Register schema
+export const registerSchema = z.object({
+  username: z.string().min(3).max(30),
+  email: z.string().email(),
+  password: z.string().min(6),
+});
+
+// Plans config
+export const PLANS = {
+  free: { name: "Free", credits: 10, price: 0, requests: 10 },
+  starter: { name: "Starter", credits: 500, price: 9, requests: 500 },
+  pro: { name: "Pro", credits: 2000, price: 29, requests: 2000 },
+  enterprise: { name: "Enterprise", credits: 10000, price: 99, requests: 10000 },
+} as const;
+
+// Multi-provider model definitions
+export interface ModelDef {
+  id: string;
+  name: string;
+  provider: string;
+  cost: number;
+  description: string;
+  category: "search" | "chat" | "reasoning" | "code" | "creative";
+}
+
+export const MODELS: ModelDef[] = [
+  // Perplexity (search-augmented)
+  { id: "sonar", name: "Sonar", provider: "perplexity", cost: 0.5, description: "Fast search-augmented chat", category: "search" },
+  { id: "sonar-pro", name: "Sonar Pro", provider: "perplexity", cost: 1, description: "Advanced search with deeper reasoning", category: "search" },
+  { id: "sonar-reasoning", name: "Sonar Reasoning", provider: "perplexity", cost: 2, description: "Multi-step reasoning with search", category: "reasoning" },
+  { id: "sonar-reasoning-pro", name: "Sonar Reasoning Pro", provider: "perplexity", cost: 3, description: "Best reasoning with search", category: "reasoning" },
+  // Anthropic
+  { id: "claude-sonnet-4", name: "Claude Sonnet 4", provider: "anthropic", cost: 1, description: "Fast, balanced intelligence", category: "chat" },
+  { id: "claude-opus-4", name: "Claude Opus 4", provider: "anthropic", cost: 3, description: "Most capable for complex tasks", category: "reasoning" },
+  { id: "claude-haiku-3.5", name: "Claude Haiku 3.5", provider: "anthropic", cost: 0.3, description: "Fastest and cheapest", category: "chat" },
+  // OpenAI
+  { id: "gpt-4o", name: "GPT-4o", provider: "openai", cost: 1, description: "Flagship multimodal model", category: "chat" },
+  { id: "gpt-4o-mini", name: "GPT-4o Mini", provider: "openai", cost: 0.3, description: "Fast and affordable", category: "chat" },
+  { id: "o1", name: "o1", provider: "openai", cost: 5, description: "Advanced reasoning model", category: "reasoning" },
+  { id: "o3-mini", name: "o3-mini", provider: "openai", cost: 2, description: "Efficient reasoning", category: "reasoning" },
+  // Google
+  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "google", cost: 1.5, description: "Most capable Gemini", category: "reasoning" },
+  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "google", cost: 0.3, description: "Fast and efficient", category: "chat" },
+];
+
+export const MODEL_COSTS: Record<string, number> = Object.fromEntries(
+  MODELS.map((m) => [m.id, m.cost])
+);
+
+export const PROVIDERS = [
+  { id: "perplexity", name: "Perplexity", color: "#01696F" },
+  { id: "anthropic", name: "Anthropic", color: "#D97757" },
+  { id: "openai", name: "OpenAI", color: "#10A37F" },
+  { id: "google", name: "Google", color: "#4285F4" },
+] as const;
+
+// Agent tool definitions
+export interface AgentTool {
+  id: string;
+  name: string;
+  description: string;
+  icon: string; // lucide icon name
+  creditMultiplier: number; // extra cost multiplier (1 = no extra)
+}
+
+export const AGENT_TOOLS: AgentTool[] = [
+  { id: "search", name: "Web Search", description: "Search the web for current information and cite sources", icon: "Globe", creditMultiplier: 1.5 },
+  { id: "document", name: "Document Generator", description: "Generate reports, summaries, and structured documents", icon: "FileText", creditMultiplier: 2 },
+  { id: "code", name: "Code Assistant", description: "Write, analyze, and debug code with explanations", icon: "Code", creditMultiplier: 1.5 },
+  { id: "analyze", name: "Data Analyzer", description: "Analyze data, create charts descriptions, and find insights", icon: "BarChart3", creditMultiplier: 2 },
+  { id: "creative", name: "Creative Writer", description: "Generate creative content, brainstorm ideas, and write copy", icon: "Sparkles", creditMultiplier: 1.5 },
+  { id: "timeline", name: "Timeline Planner", description: "Calendar-aware planning for books, marketing, and personal development with real holiday data", icon: "CalendarDays", creditMultiplier: 2 },
+];
+
+// Calendar events table (holidays, observances, marketing dates)
+export const calendarEvents = sqliteTable("calendar_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  date: text("date").notNull(), // YYYY-MM-DD
+  endDate: text("end_date"), // YYYY-MM-DD for multi-day events
+  region: text("region").notNull().default("global"), // "global", "US", "IL", "UK", etc.
+  category: text("category").notNull().default("holiday"), // holiday, religious, marketing, cultural, business, personal
+  subcategory: text("subcategory"), // jewish, christian, islamic, federal, awareness, shopping, etc.
+  importance: integer("importance").notNull().default(2), // 1=major, 2=standard, 3=minor
+  description: text("description"),
+  tags: text("tags"), // JSON array of tags for matching
+  isRecurring: integer("is_recurring", { mode: "boolean" }).notNull().default(false),
+  recurringRule: text("recurring_rule"), // "yearly-fixed", "yearly-floating", "jewish-calendar", etc.
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type CalendarEvent = typeof calendarEvents.$inferSelect;
+
+export const insertCalendarEventSchema = createInsertSchema(calendarEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertCalendarEvent = z.infer<typeof insertCalendarEventSchema>;
+
+// Season definitions
+export const SEASONS: Record<string, { months: number[]; name: string; hemisphere: string }> = {
+  "spring-north": { months: [3, 4, 5], name: "Spring", hemisphere: "north" },
+  "summer-north": { months: [6, 7, 8], name: "Summer", hemisphere: "north" },
+  "fall-north": { months: [9, 10, 11], name: "Fall", hemisphere: "north" },
+  "winter-north": { months: [12, 1, 2], name: "Winter", hemisphere: "north" },
+};
+
+// Timeline context interface used by AI prompts
+export interface TimelineContext {
+  currentDate: string;
+  targetDate?: string;
+  dateRange?: { start: string; end: string };
+  season: string;
+  upcomingHolidays: { name: string; date: string; daysAway: number; category: string }[];
+  recentHolidays: { name: string; date: string; daysAgo: number; category: string }[];
+  monthContext: string;
+  quarterContext: string;
+  relevantEvents: CalendarEvent[];
+}
+
+// === AI RULE ENGINE ===
+
+// Condition types for the rule engine
+export type RuleConditionType = "calendar" | "topic" | "user_plan" | "user_role" | "model" | "provider" | "tool" | "time_of_day" | "day_of_week" | "custom";
+
+// A single condition within a rule
+export interface RuleCondition {
+  type: RuleConditionType;
+  operator: "equals" | "not_equals" | "contains" | "not_contains" | "in" | "not_in" | "gt" | "lt" | "between" | "near_date" | "regex";
+  field: string;       // e.g., "message", "plan", "model", "holiday.name", "season"
+  value: string;       // the comparison value (JSON array for "in"/"not_in")
+  metadata?: string;   // extra config, e.g., days threshold for near_date
+}
+
+// What happens when rule fires
+export interface RuleAction {
+  type: "inject_system_prompt" | "inject_user_context" | "modify_temperature" | "force_model" | "add_disclaimer" | "block_request";
+  value: string;       // the prompt text, model id, temperature, or block reason
+  position?: "before" | "after" | "replace"; // where to inject (default: before)
+}
+
+// AI Rules table
+export const aiRules = sqliteTable("ai_rules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  description: text("description"),
+  // Conditions (JSON array of RuleCondition)
+  conditions: text("conditions").notNull().default("[]"),
+  conditionLogic: text("condition_logic").notNull().default("AND"), // "AND" or "OR"
+  // Actions (JSON array of RuleAction)
+  actions: text("actions").notNull().default("[]"),
+  // Rule metadata
+  priority: integer("priority").notNull().default(50), // 1=highest, 100=lowest
+  category: text("category").notNull().default("general"), // calendar, topic, user, safety, quality
+  // Targeting
+  appliesTo: text("applies_to").notNull().default("all"), // "all", "chat", "api", "tool:timeline", etc.
+  // Status
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  // Audit
+  createdBy: text("created_by").default("system"), // "system" or admin email
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+
+export type AiRule = typeof aiRules.$inferSelect;
+
+export const insertAiRuleSchema = createInsertSchema(aiRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertAiRule = z.infer<typeof insertAiRuleSchema>;
+
+// Rule evaluation result
+export interface RuleEvalResult {
+  ruleId: number;
+  ruleName: string;
+  priority: number;
+  actions: RuleAction[];
+  matchedConditions: string[]; // human-readable descriptions of what matched
+}
+
+// === USER TIMELINE EVENTS ===
+// Every chat interaction creates a timeline event, building a "story arc" per user
+
+export const userEvents = sqliteTable("user_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  conversationId: integer("conversation_id"),
+  messageId: integer("message_id"),
+  // What happened
+  topic: text("topic").notNull(),           // short topic label: "Book Writing", "Marketing Plan"
+  summary: text("summary").notNull(),       // 1-2 sentence summary of the interaction
+  category: text("category").notNull().default("general"), // book, marketing, personal, code, research, general
+  subcategory: text("subcategory"),         // e.g., "chapter-outline", "campaign-planning"
+  // Progress tracking
+  phase: text("phase"),                     // "discovery", "planning", "execution", "review", "completion"
+  milestone: text("milestone"),             // "Started book outline", "Completed chapter 3", null if not a milestone
+  progressPct: integer("progress_pct"),     // 0-100 if project has trackable progress
+  // Sentiment & quality
+  sentiment: text("sentiment").default("neutral"), // positive, neutral, negative, frustrated
+  complexity: integer("complexity").default(2),     // 1=simple, 2=moderate, 3=complex
+  // Context linkage
+  toolUsed: text("tool_used"),              // agent tool used if any
+  model: text("model"),                     // model used
+  creditsUsed: real("credits_used").default(0),
+  tags: text("tags"),                       // JSON array of extracted tags
+  // Metadata
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type UserEvent = typeof userEvents.$inferSelect;
+
+export const insertUserEventSchema = createInsertSchema(userEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertUserEvent = z.infer<typeof insertUserEventSchema>;
+
+// Story arc summary for a user - computed from their events
+export interface UserStoryArc {
+  userId: number;
+  username: string;
+  // Overview
+  totalEvents: number;
+  firstEventDate: string;
+  lastEventDate: string;
+  activeDays: number;
+  // Topic breakdown
+  topTopics: { topic: string; count: number; lastSeen: string }[];
+  // Progress arcs (ongoing projects)
+  activeProjects: {
+    topic: string;
+    category: string;
+    phase: string;
+    progressPct: number;
+    eventCount: number;
+    lastActivity: string;
+    milestones: string[];
+  }[];
+  // Recent events for context
+  recentEvents: UserEvent[];
+  // Sentiment trend
+  sentimentTrend: { date: string; sentiment: string }[];
+  // Narrative summary (for AI injection)
+  narrativeSummary: string;
+}
+
+// === ARTIFACTS (generated files from tools) ===
+export const artifacts = sqliteTable("artifacts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  conversationId: integer("conversation_id"),
+  messageId: integer("message_id"),
+  // File info
+  filename: text("filename").notNull(),
+  originalName: text("original_name").notNull(),
+  mimetype: text("mimetype").notNull(),
+  size: integer("size").notNull().default(0),
+  path: text("path").notNull(), // server path
+  url: text("url").notNull(),   // /api/artifacts/:filename
+  // Metadata
+  artifactType: text("artifact_type").notNull().default("file"), // file, code_output, web_snapshot, chart
+  description: text("description"),
+  metadata: text("metadata"), // JSON - extra info
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type Artifact = typeof artifacts.$inferSelect;
+export const insertArtifactSchema = createInsertSchema(artifacts).omit({ id: true, createdAt: true });
+export type InsertArtifact = z.infer<typeof insertArtifactSchema>;
+
+// === AGENT TOOLS CONFIG (admin-managed) ===
+export const agentToolsConfig = sqliteTable("agent_tools_config", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  toolId: text("tool_id").notNull().unique(), // run_code, browse_web, etc.
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  icon: text("icon").notNull().default("Zap"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  creditMultiplier: real("credit_multiplier").notNull().default(1.5),
+  maxExecutionTime: integer("max_execution_time").notNull().default(30), // seconds
+  maxCallsPerRequest: integer("max_calls_per_request").notNull().default(3),
+  customInstructions: text("custom_instructions"), // injected into system prompt when tool is used
+  inputSchema: text("input_schema"), // JSON — expected input format
+  config: text("config"), // JSON — tool-specific settings
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+
+export type AgentToolConfig = typeof agentToolsConfig.$inferSelect;
+export const insertAgentToolConfigSchema = createInsertSchema(agentToolsConfig).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertAgentToolConfig = z.infer<typeof insertAgentToolConfigSchema>;
+
+// === AGENT TOOL RULES (conditions bound to tools) ===
+export const agentToolRules = sqliteTable("agent_tool_rules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  toolId: text("tool_id").notNull(), // FK to agent_tools_config.tool_id
+  name: text("name").notNull(),
+  description: text("description"),
+  ruleType: text("rule_type").notNull().default("instruction"), // instruction, guard, transform, restrict
+  condition: text("condition"), // JSON — when this rule triggers: { field, operator, value }
+  action: text("action").notNull(), // The instruction/guard text or transform logic
+  priority: integer("priority").notNull().default(10),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  scope: text("scope").notNull().default("all"), // all, free, pro, enterprise, or specific user plan
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type AgentToolRule = typeof agentToolRules.$inferSelect;
+export const insertAgentToolRuleSchema = createInsertSchema(agentToolRules).omit({ id: true, createdAt: true });
+export type InsertAgentToolRule = z.infer<typeof insertAgentToolRuleSchema>;
+
+// === TOOL EXECUTION TYPES ===
+
+// Tool call request from AI agent
+export interface ToolCall {
+  id: string;
+  tool: string;
+  input: Record<string, any>;
+}
+
+// Tool call result
+export interface ToolResult {
+  toolCallId: string;
+  tool: string;
+  success: boolean;
+  output: string;
+  error?: string;
+  artifacts?: { filename: string; url: string; mimetype: string }[];
+  duration?: number;
+}
+
+// Agent step (one turn in the orchestration loop)
+export interface AgentStep {
+  stepNumber: number;
+  type: "thinking" | "tool_call" | "tool_result" | "response";
+  content: string;
+  toolCall?: ToolCall;
+  toolResult?: ToolResult;
+  timestamp: string;
+}
+
+// Default tool configs (used to seed the DB)
+export const DEFAULT_AGENT_TOOLS: InsertAgentToolConfig[] = [
+  { toolId: "run_code", name: "Run Code", description: "Execute Python or JavaScript code in a sandboxed environment", icon: "Terminal", creditMultiplier: 2, maxExecutionTime: 30, maxCallsPerRequest: 3, enabled: true, sortOrder: 1, customInstructions: "Always validate inputs before execution. Never execute code that accesses the network or filesystem outside the sandbox." },
+  { toolId: "browse_web", name: "Browse Web", description: "Fetch and read web pages, extract content from URLs", icon: "Globe", creditMultiplier: 1.5, maxExecutionTime: 15, maxCallsPerRequest: 3, enabled: true, sortOrder: 2, customInstructions: "Only fetch publicly accessible URLs. Summarize content rather than returning raw HTML." },
+  { toolId: "generate_file", name: "Create File", description: "Generate PDF, Word, PowerPoint, or CSV documents", icon: "FileOutput", creditMultiplier: 2.5, maxExecutionTime: 20, maxCallsPerRequest: 2, enabled: true, sortOrder: 3, customInstructions: "Always use proper formatting. Include a table of contents for long documents. Structure content with headers." },
+  { toolId: "search_web", name: "Web Search", description: "Search the web for current information using Perplexity", icon: "Search", creditMultiplier: 1.5, maxExecutionTime: 10, maxCallsPerRequest: 3, enabled: true, sortOrder: 4, customInstructions: "Cite sources when presenting search results. Prefer recent, authoritative sources." },
+  { toolId: "analyze_data", name: "Analyze Data", description: "Process data, generate charts, find insights", icon: "BarChart3", creditMultiplier: 2, maxExecutionTime: 30, maxCallsPerRequest: 2, enabled: true, sortOrder: 5, customInstructions: "Always explain methodology. Show key statistics first, then detailed breakdowns." },
+];
+
+// Default tool rules (seeded)
+export const DEFAULT_AGENT_TOOL_RULES: InsertAgentToolRule[] = [
+  { toolId: "run_code", name: "No Network Access", ruleType: "guard", action: "Block any code that imports networking libraries (requests, urllib, http, fetch) or attempts to connect to external servers.", priority: 1, enabled: true, scope: "all" },
+  { toolId: "run_code", name: "Free Plan Code Limit", ruleType: "restrict", action: "Limit code execution to 10 seconds and 100 lines for free plan users.", priority: 5, enabled: true, scope: "free" },
+  { toolId: "browse_web", name: "Safe Browsing", ruleType: "guard", action: "Only allow fetching from HTTPS URLs. Block known malicious domains and internal/private IP ranges.", priority: 1, enabled: true, scope: "all" },
+  { toolId: "generate_file", name: "File Size Limit", ruleType: "restrict", action: "Generated files must not exceed 10MB. Warn the user if content is very large.", priority: 5, enabled: true, scope: "all" },
+  { toolId: "search_web", name: "Search Rate Limit", ruleType: "restrict", action: "Maximum 5 searches per conversation for free plan users.", priority: 5, enabled: true, scope: "free" },
+  { toolId: "analyze_data", name: "Data Privacy", ruleType: "instruction", action: "Never log or store raw user data. Process in memory only and return aggregated results.", priority: 1, enabled: true, scope: "all" },
+];
+
+// Hardcoded fallback REAL_TOOLS (used if DB not yet seeded)
+export const REAL_TOOLS: AgentTool[] = [
+  { id: "run_code", name: "Run Code", description: "Execute Python or JavaScript code in a sandboxed environment", icon: "Terminal", creditMultiplier: 2 },
+  { id: "browse_web", name: "Browse Web", description: "Fetch and read web pages, extract content from URLs", icon: "Globe", creditMultiplier: 1.5 },
+  { id: "generate_file", name: "Create File", description: "Generate PDF, Word, PowerPoint, or CSV documents", icon: "FileOutput", creditMultiplier: 2.5 },
+  { id: "search_web", name: "Web Search", description: "Search the web for current information using Perplexity", icon: "Search", creditMultiplier: 1.5 },
+  { id: "analyze_data", name: "Analyze Data", description: "Process data, generate charts, find insights", icon: "BarChart3", creditMultiplier: 2 },
+];
+
+// Build dynamic system prompt from DB tool configs + rules
+export function buildAgentSystemPrompt(tools: AgentToolConfig[], rules: AgentToolRule[]): string {
+  const enabledTools = tools.filter(t => t.enabled).sort((a, b) => a.sortOrder - b.sortOrder);
+  if (enabledTools.length === 0) return "You are a helpful AI assistant.";
+
+  let prompt = `You are an AI assistant with real tool execution capabilities. You can:\n\n`;
+  enabledTools.forEach((tool, i) => {
+    prompt += `${i + 1}. **${tool.toolId}** - ${tool.description}\n`;
+  });
+
+  prompt += `\nWhen you need to use a tool, respond with a JSON tool call block:\n\`\`\`tool_call\n{"tool": "tool_name", "input": {"key": "value"}}\n\`\`\`\n\n`;
+
+  prompt += `Tool input formats:\n`;
+  enabledTools.forEach(tool => {
+    if (tool.inputSchema) {
+      prompt += `- ${tool.toolId}: ${tool.inputSchema}\n`;
+    } else {
+      // Default schemas
+      const defaults: Record<string, string> = {
+        run_code: '{"language": "python"|"javascript", "code": "..."}',
+        browse_web: '{"url": "https://...", "extract": "text"|"summary"|"links"}',
+        generate_file: '{"format": "pdf"|"csv"|"html"|"txt"|"json"|"md", "title": "...", "content": "..."}',
+        search_web: '{"query": "search terms"}',
+        analyze_data: '{"task": "description", "data": "inline data"}',
+      };
+      prompt += `- ${tool.toolId}: ${defaults[tool.toolId] || '{"input": "..."}'}\n`;
+    }
+  });
+
+  // Add tool-specific custom instructions
+  const toolInstructions = enabledTools.filter(t => t.customInstructions).map(t => `- **${t.name}**: ${t.customInstructions}`);
+  if (toolInstructions.length > 0) {
+    prompt += `\nTool-specific instructions:\n${toolInstructions.join("\n")}\n`;
+  }
+
+  // Add active rules
+  const activeRules = rules.filter(r => r.enabled).sort((a, b) => a.priority - b.priority);
+  if (activeRules.length > 0) {
+    prompt += `\nActive rules:\n`;
+    activeRules.forEach(rule => {
+      const label = rule.ruleType === "guard" ? "🛡️ GUARD" : rule.ruleType === "restrict" ? "⚠️ RESTRICT" : rule.ruleType === "transform" ? "🔄 TRANSFORM" : "📋 INSTRUCTION";
+      prompt += `- [${label}] ${rule.name}: ${rule.action}${rule.scope !== "all" ? ` (applies to: ${rule.scope} plan)` : ""}\n`;
+    });
+  }
+
+  prompt += `\nAfter receiving a tool result, you can:\n- Use the result to answer the user's question\n- Call another tool if needed (multi-step)\n- Generate a final response\n\nImportant:\n- Think step by step before using tools\n- Use the simplest tool that accomplishes the task\n- Always explain what you're doing and what the result means\n- If a tool fails, try an alternative approach\n- Always produce a final text response after tool execution\n\nContext: The user's story arc and calendar context may be injected. Use them for personalization.\n`;
+
+  return prompt;
+}
+
+// Legacy static prompt (fallback)
+export const AGENT_SYSTEM_PROMPT = `You are an AI assistant with real tool execution capabilities. You can:
+
+1. **run_code** - Execute Python or JavaScript code.
+2. **browse_web** - Fetch and read web pages.
+3. **generate_file** - Create documents (PDF, CSV, HTML, TXT, JSON, MD).
+4. **search_web** - Search the internet for current information.
+5. **analyze_data** - Process uploaded data, generate insights.
+
+When you need to use a tool, respond with a JSON tool call block:
+\`\`\`tool_call
+{"tool": "tool_name", "input": {"key": "value"}}
+\`\`\`
+
+Tool input formats:
+- run_code: {"language": "python"|"javascript", "code": "..."}
+- browse_web: {"url": "https://...", "extract": "text"|"summary"|"links"}
+- generate_file: {"format": "pdf"|"csv"|"html"|"txt"|"json"|"md", "title": "...", "content": "..."}
+- search_web: {"query": "search terms"}
+- analyze_data: {"task": "description of analysis", "data": "inline data"}
+
+After receiving a tool result, you can use it to answer, call another tool, or produce a final response.
+Think step by step. Always explain what you're doing. If a tool fails, try an alternative.
+`;
+
+// Admin credentials
+export const ADMIN_EMAIL = "admin@aiproxy.io";
+export const ADMIN_PASSWORD = "admin2026!";

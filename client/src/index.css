@@ -1,0 +1,293 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Heebo:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* LIGHT MODE — Cool indigo-teal SaaS palette */
+:root {
+  --button-outline: rgba(0, 0, 0, 0.1);
+  --badge-outline: rgba(0, 0, 0, 0.05);
+  --opaque-button-border-intensity: -8;
+  --elevate-1: rgba(0, 0, 0, 0.03);
+  --elevate-2: rgba(0, 0, 0, 0.08);
+  --background: 220 20% 97%;
+  --foreground: 222 47% 11%;
+  --border: 220 13% 91%;
+  --card: 220 20% 98%;
+  --card-foreground: 222 47% 11%;
+  --card-border: 220 13% 93%;
+  --sidebar: 222 20% 96%;
+  --sidebar-foreground: 222 47% 11%;
+  --sidebar-border: 220 13% 91%;
+  --sidebar-primary: 199 89% 32%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 220 14% 90%;
+  --sidebar-accent-foreground: 222 47% 11%;
+  --sidebar-ring: 199 89% 32%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 47% 11%;
+  --popover-border: 220 13% 91%;
+  --primary: 199 89% 32%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 14% 92%;
+  --secondary-foreground: 222 47% 11%;
+  --muted: 220 14% 93%;
+  --muted-foreground: 220 9% 46%;
+  --accent: 220 14% 92%;
+  --accent-foreground: 222 47% 11%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 220 13% 80%;
+  --ring: 199 89% 32%;
+  --chart-1: 199 89% 32%;
+  --chart-2: 262 60% 48%;
+  --chart-3: 173 58% 39%;
+  --chart-4: 43 74% 49%;
+  --chart-5: 27 87% 55%;
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+  --radius: 0.5rem;
+  --shadow-2xs: 0px 1px 2px rgba(0,0,0,0.04);
+  --shadow-xs: 0px 1px 2px rgba(0,0,0,0.06);
+  --shadow-sm: 0px 1px 3px rgba(0,0,0,0.08);
+  --shadow: 0px 2px 4px rgba(0,0,0,0.08);
+  --shadow-md: 0px 4px 8px rgba(0,0,0,0.1);
+  --shadow-lg: 0px 8px 16px rgba(0,0,0,0.12);
+  --shadow-xl: 0px 12px 24px rgba(0,0,0,0.14);
+  --shadow-2xl: 0px 16px 32px rgba(0,0,0,0.16);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+  --primary-border: hsl(var(--primary));
+  --secondary-border: hsl(var(--secondary));
+  --muted-border: hsl(var(--muted));
+  --accent-border: hsl(var(--accent));
+  --destructive-border: hsl(var(--destructive));
+}
+
+/* DARK MODE */
+.dark {
+  --button-outline: rgba(255, 255, 255, 0.1);
+  --badge-outline: rgba(255, 255, 255, 0.05);
+  --opaque-button-border-intensity: 9;
+  --elevate-1: rgba(255, 255, 255, 0.04);
+  --elevate-2: rgba(255, 255, 255, 0.09);
+  --background: 224 20% 7%;
+  --foreground: 210 20% 92%;
+  --border: 220 10% 17%;
+  --card: 224 18% 9%;
+  --card-foreground: 210 20% 92%;
+  --card-border: 220 10% 14%;
+  --sidebar: 224 20% 10%;
+  --sidebar-foreground: 210 20% 92%;
+  --sidebar-border: 220 10% 15%;
+  --sidebar-primary: 199 70% 45%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 220 10% 17%;
+  --sidebar-accent-foreground: 210 20% 92%;
+  --sidebar-ring: 199 70% 45%;
+  --popover: 224 18% 12%;
+  --popover-foreground: 210 20% 92%;
+  --popover-border: 220 10% 18%;
+  --primary: 199 70% 45%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 10% 18%;
+  --secondary-foreground: 210 20% 92%;
+  --muted: 220 10% 19%;
+  --muted-foreground: 220 8% 58%;
+  --accent: 220 10% 17%;
+  --accent-foreground: 210 20% 92%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 220 10% 28%;
+  --ring: 199 70% 45%;
+  --chart-1: 199 70% 55%;
+  --chart-2: 262 60% 65%;
+  --chart-3: 173 58% 50%;
+  --chart-4: 43 74% 60%;
+  --chart-5: 27 87% 60%;
+
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+  --primary-border: hsl(var(--primary));
+  --secondary-border: hsl(var(--secondary));
+  --muted-border: hsl(var(--muted));
+  --accent-border: hsl(var(--accent));
+  --destructive-border: hsl(var(--destructive));
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+
+  /* RTL font override — use Heebo for Hebrew */
+  html.rtl body {
+    font-family: 'Heebo', 'DM Sans', system-ui, sans-serif;
+  }
+}
+
+/* Elevate system */
+@layer utilities {
+  input[type='search']::-webkit-search-cancel-button {
+    @apply hidden;
+  }
+
+  [contenteditable][data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    color: hsl(var(--muted-foreground));
+    pointer-events: none;
+  }
+
+  .no-default-hover-elevate {}
+  .no-default-active-elevate {}
+
+  .toggle-elevate::before,
+  .toggle-elevate-2::before {
+    content: '';
+    pointer-events: none;
+    position: absolute;
+    inset: 0px;
+    border-radius: inherit;
+    z-index: -1;
+  }
+
+  .toggle-elevate.toggle-elevated::before {
+    background-color: var(--elevate-2);
+  }
+
+  .border.toggle-elevate::before {
+    inset: -1px;
+  }
+
+  .hover-elevate:not(.no-default-hover-elevate),
+  .active-elevate:not(.no-default-active-elevate),
+  .hover-elevate-2:not(.no-default-hover-elevate),
+  .active-elevate-2:not(.no-default-active-elevate) {
+    position: relative;
+    z-index: 0;
+  }
+
+  .hover-elevate:not(.no-default-hover-elevate)::after,
+  .active-elevate:not(.no-default-active-elevate)::after,
+  .hover-elevate-2:not(.no-default-hover-elevate)::after,
+  .active-elevate-2:not(.no-default-active-elevate)::after {
+    content: '';
+    pointer-events: none;
+    position: absolute;
+    inset: 0px;
+    border-radius: inherit;
+    z-index: 999;
+  }
+
+  .hover-elevate:hover:not(.no-default-hover-elevate)::after,
+  .active-elevate:active:not(.no-default-active-elevate)::after {
+    background-color: var(--elevate-1);
+  }
+
+  .hover-elevate-2:hover:not(.no-default-hover-elevate)::after,
+  .active-elevate-2:active:not(.no-default-active-elevate)::after {
+    background-color: var(--elevate-2);
+  }
+
+  .border.hover-elevate:not(.no-hover-interaction-elevate)::after,
+  .border.active-elevate:not(.no-active-interaction-elevate)::after,
+  .border.hover-elevate-2:not(.no-hover-interaction-elevate)::after,
+  .border.active-elevate-2:not(.no-active-interaction-elevate)::after {
+    inset: -1px;
+  }
+}
+
+/* ============ RTL support ============ */
+
+/* Mirror sidebar to the right in RTL */
+html[dir="rtl"] [data-sidebar="sidebar"] {
+  border-right: none;
+  border-left: 1px solid hsl(var(--sidebar-border));
+}
+
+html[dir="rtl"] [data-sidebar="sidebar"] ~ div {
+  border-left: none;
+}
+
+/* Flip flex direction for icon+label rows */
+html[dir="rtl"] .flex-row-reverse-rtl {
+  flex-direction: row-reverse;
+}
+
+/* Logical spacing helpers — use on elements with directional margins/padding */
+html[dir="rtl"] .mr-1 { margin-right: 0; margin-left: 0.25rem; }
+html[dir="rtl"] .mr-2 { margin-right: 0; margin-left: 0.5rem; }
+html[dir="rtl"] .mr-3 { margin-right: 0; margin-left: 0.75rem; }
+html[dir="rtl"] .mr-4 { margin-right: 0; margin-left: 1rem; }
+html[dir="rtl"] .ml-1 { margin-left: 0; margin-right: 0.25rem; }
+html[dir="rtl"] .ml-2 { margin-left: 0; margin-right: 0.5rem; }
+html[dir="rtl"] .ml-3 { margin-left: 0; margin-right: 0.75rem; }
+html[dir="rtl"] .ml-4 { margin-left: 0; margin-right: 1rem; }
+html[dir="rtl"] .ml-auto { margin-left: 0; margin-right: auto; }
+
+/* Flip left/right padding */
+html[dir="rtl"] .pl-2 { padding-left: 0; padding-right: 0.5rem; }
+html[dir="rtl"] .pl-3 { padding-left: 0; padding-right: 0.75rem; }
+html[dir="rtl"] .pl-4 { padding-left: 0; padding-right: 1rem; }
+html[dir="rtl"] .pr-2 { padding-right: 0; padding-left: 0.5rem; }
+html[dir="rtl"] .pr-3 { padding-right: 0; padding-left: 0.75rem; }
+html[dir="rtl"] .pr-4 { padding-right: 0; padding-left: 1rem; }
+
+/* Borders */
+html[dir="rtl"] .border-r { border-right: none; border-left: 1px solid hsl(var(--border)); }
+html[dir="rtl"] .border-l { border-left: none; border-right: 1px solid hsl(var(--border)); }
+
+/* Text alignment */
+html[dir="rtl"] .text-left { text-align: right; }
+html[dir="rtl"] .text-right { text-align: left; }
+
+/* Rotate directional icons */
+html[dir="rtl"] .rtl-flip {
+  transform: scaleX(-1);
+}
+
+/* Chat bubble alignment — user messages on left in RTL */
+html[dir="rtl"] .chat-user-row {
+  flex-direction: row-reverse;
+}
+
+/* Fix absolute positioned elements (like close buttons) */
+html[dir="rtl"] .-right-1\.5 { right: auto; left: -0.375rem; }
+html[dir="rtl"] .-top-1\.5 { /* keep top as is */ }
+
+/* Prose RTL */
+html[dir="rtl"] .prose {
+  text-align: right;
+}
+
+/* Follow-up arrow flip */
+html[dir="rtl"] .followup-arrow {
+  transform: scaleX(-1);
+}
+
+/* Slider track direction */
+html[dir="rtl"] [role="slider"] {
+  direction: ltr; /* sliders should stay LTR */
+}
+
+/* Prose styling for chat */
+.prose pre {
+  @apply bg-muted rounded-lg p-3 text-sm overflow-x-auto;
+}
+
+.prose code {
+  @apply bg-muted px-1 py-0.5 rounded text-sm;
+}
+
+.prose pre code {
+  @apply bg-transparent p-0;
+}
