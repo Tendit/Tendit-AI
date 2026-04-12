@@ -926,7 +926,7 @@ export async function registerRoutes(
       });
       const matchedRules = await evaluateRules(ruleCtx);
       if (matchedRules.length > 0) {
-        const applied = applyRuleActions(matchedRules, messagesForApi);
+        const applied = applyRuleActions(matchedRules, [...messagesForApi]);
         if (applied.blocked) {
           return res.status(403).json({ message: applied.blocked });
         }
