@@ -769,6 +769,62 @@ After receiving a tool result, you can use it to answer, call another tool, or p
 Think step by step. Always explain what you're doing. If a tool fails, try an alternative.
 `;
 
+// === TELEGRAM BOT RELAY ===
+
+// Telegram bot configuration (one per agent)
+export const telegramBots = sqliteTable("telegram_bots", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  agentId: integer("agent_id").notNull(), // which platform agent this bot represents
+  botToken: text("bot_token").notNull(), // Telegram bot API token from @BotFather
+  botUsername: text("bot_username"), // @johnny_tendit_bot etc.
+  webhookSecret: text("webhook_secret"), // random secret for webhook verification
+  ownerTelegramChatId: text("owner_telegram_chat_id"), // admin/owner's Telegram chat ID (for relay)
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type TelegramBot = typeof telegramBots.$inferSelect;
+export const insertTelegramBotSchema = createInsertSchema(telegramBots).omit({ id: true, createdAt: true });
+export type InsertTelegramBot = z.infer<typeof insertTelegramBotSchema>;
+
+// Linked Telegram accounts — maps Telegram users to web platform users
+export const telegramLinks = sqliteTable("telegram_links", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  telegramChatId: text("telegram_chat_id").notNull(), // Telegram chat_id (string for safety)
+  telegramUsername: text("telegram_username"), // @username if available
+  telegramFirstName: text("telegram_first_name"),
+  userId: integer("user_id"), // linked web platform user (null = unlinked Telegram-only contact)
+  botId: integer("bot_id").notNull(), // which bot this link is through
+  role: text("role").notNull().default("contact"), // "owner" = admin, "user" = linked platform user, "contact" = external person
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  linkedAt: text("linked_at").notNull().default(new Date().toISOString()),
+});
+
+export type TelegramLink = typeof telegramLinks.$inferSelect;
+export const insertTelegramLinkSchema = createInsertSchema(telegramLinks).omit({ id: true, linkedAt: true });
+export type InsertTelegramLink = z.infer<typeof insertTelegramLinkSchema>;
+
+// Relay messages — log of all messages passing through the bot
+export const relayMessages = sqliteTable("relay_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  botId: integer("bot_id").notNull(),
+  direction: text("direction").notNull(), // "telegram_in" | "telegram_out" | "web_in" | "web_out"
+  telegramChatId: text("telegram_chat_id"),
+  userId: integer("user_id"), // web platform user if applicable
+  senderName: text("sender_name"),
+  originalMessage: text("original_message").notNull(),
+  processedMessage: text("processed_message"), // AI-enhanced version if applicable
+  aiSummary: text("ai_summary"), // AI-generated summary for relay notifications
+  messageType: text("message_type").notNull().default("text"), // text, action, notification, system
+  relatedRequestId: integer("related_request_id"), // if an agent action was extracted
+  metadata: text("metadata"), // JSON — extra data (telegram message_id, etc.)
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type RelayMessage = typeof relayMessages.$inferSelect;
+export const insertRelayMessageSchema = createInsertSchema(relayMessages).omit({ id: true, createdAt: true });
+export type InsertRelayMessage = z.infer<typeof insertRelayMessageSchema>;
+
 // Admin credentials
 export const ADMIN_EMAIL = "admin@aiproxy.io";
 export const ADMIN_PASSWORD = "admin2026!";

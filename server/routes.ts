@@ -7,6 +7,7 @@ import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from ".
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
 import { captureUserEvent, buildUserStoryArc, buildStoryArcContextForChat } from "./story-arc";
 import { runAgentLoop } from "./agent-orchestrator";
+import { handleTelegramUpdate, notifyOwnerFromWeb, setCallProvider, initTelegramBots, setTelegramWebhook, getTelegramBotInfo, sendTelegramMessage } from "./telegram";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import multer from "multer";
@@ -1795,6 +1796,10 @@ export async function registerRoutes(
       // Clean response text (remove JSON blocks for display)
       const cleanContent = content.replace(/```json\s*\n?[\s\S]*?\n?```/g, "").trim();
 
+      // Notify agent owner via Telegram (non-blocking)
+      const user = await storage.getUser(userId);
+      notifyOwnerFromWeb(agentId, user?.username || "User", message, actions).catch(() => {});
+
       return res.json({
         content: cleanContent,
         actions,
@@ -2100,6 +2105,145 @@ export async function registerRoutes(
       });
       const data = await response.json();
       return res.json(data);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // === TELEGRAM BOT RELAY ===
+
+  // Inject callProvider into telegram module
+  setCallProvider(callProvider);
+
+  // Initialize webhooks for active bots on startup
+  const PORT = process.env.PORT || "5000";
+  const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
+  initTelegramBots(BASE_URL);
+
+  // Telegram webhook endpoint (no auth — verified by secret token)
+  app.post("/api/telegram/webhook/:botId", async (req, res) => {
+    try {
+      const botId = parseInt(req.params.botId);
+      const bot = await storage.getTelegramBotById(botId);
+      if (!bot || !bot.isActive) return res.status(404).json({ ok: false });
+
+      // Verify secret token if set
+      if (bot.webhookSecret) {
+        const headerSecret = req.headers["x-telegram-bot-api-secret-token"];
+        if (headerSecret !== bot.webhookSecret) {
+          return res.status(403).json({ ok: false });
+        }
+      }
+
+      // Get the agent
+      const agent = await storage.getAgent(bot.agentId);
+      if (!agent) return res.status(404).json({ ok: false });
+
+      // Process update in background (Telegram expects quick 200)
+      res.json({ ok: true });
+      handleTelegramUpdate(bot, agent, req.body).catch(e => console.error("Telegram update error:", e.message));
+    } catch (e: any) {
+      console.error("Telegram webhook error:", e.message);
+      return res.status(500).json({ ok: false });
+    }
+  });
+
+  // Admin: List Telegram bots
+  app.get("/api/admin/telegram/bots", adminMiddleware, async (_req, res) => {
+    const bots = await storage.getTelegramBots();
+    return res.json(bots);
+  });
+
+  // Admin: Create Telegram bot config
+  app.post("/api/admin/telegram/bots", adminMiddleware, async (req, res) => {
+    try {
+      const { agentId, botToken } = req.body;
+      if (!agentId || !botToken) return res.status(400).json({ message: "agentId and botToken required" });
+
+      // Verify bot token with Telegram API
+      const botInfo = await getTelegramBotInfo(botToken);
+      if (!botInfo.ok) return res.status(400).json({ message: "Invalid bot token: " + (botInfo.description || "check token") });
+
+      const webhookSecret = randomUUID();
+      const bot = await storage.createTelegramBot({
+        agentId,
+        botToken,
+        botUsername: botInfo.result?.username || null,
+        webhookSecret,
+        isActive: true,
+      });
+
+      // Set webhook
+      const webhookUrl = `${BASE_URL}/api/telegram/webhook/${bot.id}`;
+      const whResult = await setTelegramWebhook(botToken, webhookUrl, webhookSecret);
+
+      return res.json({ ...bot, webhookSet: whResult.ok, botInfo: botInfo.result });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: Update Telegram bot
+  app.patch("/api/admin/telegram/bots/:id", adminMiddleware, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updated = await storage.updateTelegramBot(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Bot not found" });
+
+      // Re-set webhook if token changed or bot was activated
+      if (req.body.botToken || req.body.isActive) {
+        const bot = updated;
+        if (bot.isActive) {
+          const webhookUrl = `${BASE_URL}/api/telegram/webhook/${bot.id}`;
+          await setTelegramWebhook(bot.botToken, webhookUrl, bot.webhookSecret || undefined);
+        }
+      }
+
+      return res.json(updated);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: Delete Telegram bot
+  app.delete("/api/admin/telegram/bots/:id", adminMiddleware, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const bot = await storage.getTelegramBotById(id);
+    if (bot) {
+      // Remove webhook
+      await setTelegramWebhook(bot.botToken, "");
+    }
+    await storage.deleteTelegramBot(id);
+    return res.json({ message: "Deleted" });
+  });
+
+  // Admin: Get relay messages for a bot
+  app.get("/api/admin/telegram/bots/:id/messages", adminMiddleware, async (req, res) => {
+    const botId = parseInt(req.params.id);
+    const messages = await storage.getRelayMessages(botId, 100);
+    return res.json(messages);
+  });
+
+  // Admin: Get telegram links for a bot
+  app.get("/api/admin/telegram/bots/:id/links", adminMiddleware, async (req, res) => {
+    const botId = parseInt(req.params.id);
+    const links = await storage.getTelegramLinksByBot(botId);
+    return res.json(links);
+  });
+
+  // Admin: Send test message via Telegram
+  app.post("/api/admin/telegram/bots/:id/test", adminMiddleware, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const bot = await storage.getTelegramBotById(id);
+      if (!bot) return res.status(404).json({ message: "Bot not found" });
+      if (!bot.ownerTelegramChatId) return res.status(400).json({ message: "No owner chat ID. Send /start to the bot first." });
+
+      const { message: msg } = req.body;
+      await sendTelegramMessage(bot.botToken, bot.ownerTelegramChatId, msg || "🔔 Test message from Tendit!");
+      return res.json({ message: "Sent" });
     } catch (e: any) {
       return res.status(500).json({ message: e.message });
     }

@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Plus, Trash2, UserPlus, UserMinus, Clock, CheckCircle, XCircle, Users, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
+import { Bot, Plus, Trash2, UserPlus, UserMinus, Clock, CheckCircle, XCircle, Users, AlertCircle, ChevronDown, ChevronUp, Send, MessageSquare, Link2, Unlink, TestTube } from "lucide-react";
 
 interface Agent {
   id: number;
@@ -56,6 +56,28 @@ interface SimpleUser {
   email: string;
 }
 
+interface TgBot {
+  id: number;
+  agentId: number;
+  botToken: string;
+  botUsername: string | null;
+  webhookSecret: string | null;
+  ownerTelegramChatId: string | null;
+  isActive: boolean;
+  createdAt: string;
+}
+
+interface RelayMsg {
+  id: number;
+  botId: number;
+  direction: string;
+  telegramChatId: string | null;
+  senderName: string | null;
+  originalMessage: string;
+  messageType: string;
+  createdAt: string;
+}
+
 const CAPABILITY_OPTIONS = [
   { value: "create_event", label: "Create Event", labelHe: "יצירת אירוע" },
   { value: "set_reminder", label: "Set Reminder", labelHe: "הגדרת תזכורת" },
@@ -94,6 +116,14 @@ export default function AdminAgentsPage() {
   // Expanded agents
   const [expandedAgent, setExpandedAgent] = useState<number | null>(null);
 
+  // Telegram bot config
+  const [tgBots, setTgBots] = useState<TgBot[]>([]);
+  const [showTgSetup, setShowTgSetup] = useState<number | null>(null); // agentId
+  const [tgToken, setTgToken] = useState("");
+  const [tgConnecting, setTgConnecting] = useState(false);
+  const [tgMessages, setTgMessages] = useState<RelayMsg[]>([]);
+  const [showTgMessages, setShowTgMessages] = useState<number | null>(null); // botId
+
   useEffect(() => {
     loadAll();
   }, []);
@@ -122,6 +152,12 @@ export default function AdminAgentsPage() {
         } catch { assignMap[agent.id] = []; }
       }
       setAgentAssignments(assignMap);
+
+      // Load Telegram bots
+      try {
+        const tgRes = await authFetch("GET", "/api/admin/telegram/bots");
+        setTgBots(await tgRes.json());
+      } catch { setTgBots([]); }
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     }
@@ -519,6 +555,161 @@ export default function AdminAgentsPage() {
                         {agent.ownerPhone && <span>{en ? "Phone" : "טלפון"}: {agent.ownerPhone}</span>}
                         <span>{en ? "Created" : "נוצר"}: {new Date(agent.createdAt).toLocaleDateString()}</span>
                       </div>
+
+                      {/* Telegram Bot Config */}
+                      <div>
+                        <div className={`flex items-center justify-between mb-2 ${isRtl ? "flex-row-reverse" : ""}`}>
+                          <h3 className="text-sm font-semibold flex items-center gap-1.5">
+                            <Send className="w-3.5 h-3.5" />
+                            {en ? "Telegram Bot" : "בוט טלגרם"}
+                          </h3>
+                        </div>
+                        {(() => {
+                          const tgBot = tgBots.find(b => b.agentId === agent.id);
+                          if (tgBot) {
+                            return (
+                              <div className="space-y-2">
+                                <div className={`flex items-center gap-3 p-2.5 rounded-md border bg-muted/30 ${isRtl ? "flex-row-reverse" : ""}`}>
+                                  <div className={`flex-1 ${isRtl ? "text-right" : ""}`}>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-medium text-sm">@{tgBot.botUsername || "bot"}</span>
+                                      <Badge variant={tgBot.isActive ? "default" : "secondary"} className="text-xs">
+                                        {tgBot.isActive ? (en ? "Active" : "פעיל") : (en ? "Inactive" : "לא פעיל")}
+                                      </Badge>
+                                      {tgBot.ownerTelegramChatId && (
+                                        <Badge variant="outline" className="text-xs">
+                                          <Link2 className="w-2.5 h-2.5 mr-0.5" />
+                                          {en ? "Owner linked" : "בעלים מקושר"}
+                                        </Badge>
+                                      )}
+                                    </div>
+                                    <p className="text-xs text-muted-foreground mt-0.5">
+                                      {en ? "Messages relay between Telegram and web platform" : "ממסר הודעות בין טלגרם לפלטפורמה"}
+                                    </p>
+                                  </div>
+                                  <div className="flex gap-1">
+                                    <Button size="sm" variant="outline" onClick={async () => {
+                                      try {
+                                        await authFetch("POST", `/api/admin/telegram/bots/${tgBot.id}/test`);
+                                        toast({ title: en ? "Test message sent" : "הודעת בדיקה נשלחה" });
+                                      } catch (e: any) {
+                                        toast({ title: "Error", description: e.message, variant: "destructive" });
+                                      }
+                                    }} data-testid={`button-tg-test-${agent.id}`}>
+                                      <TestTube className="w-3 h-3 mr-1" />{en ? "Test" : "בדיקה"}
+                                    </Button>
+                                    <Button size="sm" variant="outline" onClick={async () => {
+                                      if (showTgMessages === tgBot.id) {
+                                        setShowTgMessages(null);
+                                        return;
+                                      }
+                                      try {
+                                        const msgRes = await authFetch("GET", `/api/admin/telegram/bots/${tgBot.id}/messages`);
+                                        setTgMessages(await msgRes.json());
+                                        setShowTgMessages(tgBot.id);
+                                      } catch { setTgMessages([]); }
+                                    }} data-testid={`button-tg-messages-${agent.id}`}>
+                                      <MessageSquare className="w-3 h-3 mr-1" />{en ? "Messages" : "הודעות"}
+                                    </Button>
+                                    <Button size="sm" variant="destructive" onClick={async () => {
+                                      try {
+                                        await authFetch("DELETE", `/api/admin/telegram/bots/${tgBot.id}`);
+                                        toast({ title: en ? "Bot removed" : "הבוט הוסר" });
+                                        loadAll();
+                                      } catch (e: any) {
+                                        toast({ title: "Error", description: e.message, variant: "destructive" });
+                                      }
+                                    }} data-testid={`button-tg-delete-${agent.id}`}>
+                                      <Unlink className="w-3 h-3" />
+                                    </Button>
+                                  </div>
+                                </div>
+
+                                {/* Message log */}
+                                {showTgMessages === tgBot.id && tgMessages.length > 0 && (
+                                  <div className="border rounded-md p-2 max-h-60 overflow-y-auto space-y-1">
+                                    <p className="text-xs font-semibold text-muted-foreground mb-1">
+                                      {en ? `Recent messages (${tgMessages.length})` : `הודעות אחרונות (${tgMessages.length})`}
+                                    </p>
+                                    {tgMessages.slice(0, 30).map(msg => {
+                                      const dirIcon = msg.direction === "telegram_in" ? "→" : msg.direction === "telegram_out" ? "←" : msg.direction === "web_in" ? "🌐→" : "🌐←";
+                                      return (
+                                        <div key={msg.id} className="text-xs border-b last:border-0 pb-1">
+                                          <span className="text-muted-foreground">{new Date(msg.createdAt).toLocaleTimeString()}</span>
+                                          <span className="mx-1">{dirIcon}</span>
+                                          <span className="font-medium">{msg.senderName || "System"}</span>:
+                                          <span className="ml-1">{msg.originalMessage?.substring(0, 100)}{(msg.originalMessage?.length || 0) > 100 ? "..." : ""}</span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
+                          // No bot configured — show setup button
+                          return (
+                            <div>
+                              {showTgSetup === agent.id ? (
+                                <div className="space-y-2">
+                                  <p className="text-xs text-muted-foreground">
+                                    {en
+                                      ? "1. Open Telegram → @BotFather → /newbot → copy the token"
+                                      : "1. פתח טלגרם → @BotFather → /newbot → העתק את הטוקן"}
+                                  </p>
+                                  <div className="flex gap-2">
+                                    <Input
+                                      value={tgToken}
+                                      onChange={e => setTgToken(e.target.value)}
+                                      placeholder="123456:ABCdef..."
+                                      className="font-mono text-xs"
+                                      data-testid={`input-tg-token-${agent.id}`}
+                                    />
+                                    <Button
+                                      size="sm"
+                                      disabled={!tgToken.trim() || tgConnecting}
+                                      onClick={async () => {
+                                        setTgConnecting(true);
+                                        try {
+                                          const res = await authFetch("POST", "/api/admin/telegram/bots", {
+                                            agentId: agent.id,
+                                            botToken: tgToken.trim(),
+                                          });
+                                          const data = await res.json();
+                                          if (data.id) {
+                                            toast({ title: en ? `Bot @${data.botUsername || "connected"} linked!` : `בוט @${data.botUsername || "מחובר"} קושר!` });
+                                            setTgToken("");
+                                            setShowTgSetup(null);
+                                            loadAll();
+                                          } else {
+                                            toast({ title: "Error", description: data.message, variant: "destructive" });
+                                          }
+                                        } catch (e: any) {
+                                          toast({ title: "Error", description: e.message, variant: "destructive" });
+                                        }
+                                        setTgConnecting(false);
+                                      }}
+                                      data-testid={`button-tg-connect-${agent.id}`}
+                                    >
+                                      {tgConnecting ? "..." : (en ? "Connect" : "חבר")}
+                                    </Button>
+                                    <Button size="sm" variant="ghost" onClick={() => { setShowTgSetup(null); setTgToken(""); }}>
+                                      {en ? "Cancel" : "ביטול"}
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <Button size="sm" variant="outline" onClick={() => setShowTgSetup(agent.id)} data-testid={`button-tg-setup-${agent.id}`}>
+                                  <Send className="w-3 h-3 mr-1" />
+                                  {en ? "Connect Telegram Bot" : "חבר בוט טלגרם"}
+                                </Button>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      <Separator />
 
                       <div className={`flex gap-2 ${isRtl ? "flex-row-reverse" : ""}`}>
                         <Button size="sm" variant="destructive" onClick={() => deleteAgent(agent.id)} data-testid={`button-delete-${agent.id}`}>

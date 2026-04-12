@@ -16,6 +16,9 @@ import {
   type ScheduleItem, type InsertScheduleItem, scheduleItems,
   type AgentToolConfig, type InsertAgentToolConfig, agentToolsConfig,
   type AgentToolRule, type InsertAgentToolRule, agentToolRules,
+  type TelegramBot, type InsertTelegramBot, telegramBots,
+  type TelegramLink, type InsertTelegramLink, telegramLinks,
+  type RelayMessage, type InsertRelayMessage, relayMessages,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
   DEFAULT_AGENT_TOOLS, DEFAULT_AGENT_TOOL_RULES,
 } from "@shared/schema";
@@ -952,6 +955,79 @@ export class DatabaseStorage implements IStorage {
 
   async deleteScheduleItem(id: number): Promise<void> {
     db.delete(scheduleItems).where(eq(scheduleItems.id, id)).run();
+  }
+
+  // === Telegram Bots ===
+  async createTelegramBot(data: InsertTelegramBot): Promise<TelegramBot> {
+    return db.insert(telegramBots).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  async getTelegramBots(): Promise<TelegramBot[]> {
+    return db.select().from(telegramBots).all();
+  }
+
+  async getTelegramBotByAgentId(agentId: number): Promise<TelegramBot | undefined> {
+    return db.select().from(telegramBots).where(eq(telegramBots.agentId, agentId)).get();
+  }
+
+  async getTelegramBotById(id: number): Promise<TelegramBot | undefined> {
+    return db.select().from(telegramBots).where(eq(telegramBots.id, id)).get();
+  }
+
+  async updateTelegramBot(id: number, data: Partial<InsertTelegramBot>): Promise<TelegramBot | undefined> {
+    return db.update(telegramBots).set(data).where(eq(telegramBots.id, id)).returning().get();
+  }
+
+  async deleteTelegramBot(id: number): Promise<void> {
+    db.delete(telegramBots).where(eq(telegramBots.id, id)).run();
+  }
+
+  async getActiveTelegramBots(): Promise<TelegramBot[]> {
+    return db.select().from(telegramBots).where(eq(telegramBots.isActive, true)).all();
+  }
+
+  // === Telegram Links ===
+  async createTelegramLink(data: InsertTelegramLink): Promise<TelegramLink> {
+    return db.insert(telegramLinks).values({ ...data, linkedAt: new Date().toISOString() }).returning().get();
+  }
+
+  async getTelegramLink(botId: number, telegramChatId: string): Promise<TelegramLink | undefined> {
+    return db.select().from(telegramLinks).where(
+      and(eq(telegramLinks.botId, botId), eq(telegramLinks.telegramChatId, telegramChatId))
+    ).get();
+  }
+
+  async getTelegramLinkByUserId(botId: number, userId: number): Promise<TelegramLink | undefined> {
+    return db.select().from(telegramLinks).where(
+      and(eq(telegramLinks.botId, botId), eq(telegramLinks.userId, userId))
+    ).get();
+  }
+
+  async getTelegramLinksByBot(botId: number): Promise<TelegramLink[]> {
+    return db.select().from(telegramLinks).where(eq(telegramLinks.botId, botId)).all();
+  }
+
+  async updateTelegramLink(id: number, data: Partial<InsertTelegramLink>): Promise<TelegramLink | undefined> {
+    return db.update(telegramLinks).set(data).where(eq(telegramLinks.id, id)).returning().get();
+  }
+
+  // === Relay Messages ===
+  async createRelayMessage(data: InsertRelayMessage): Promise<RelayMessage> {
+    return db.insert(relayMessages).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  async getRelayMessages(botId: number, limit = 50): Promise<RelayMessage[]> {
+    return db.select().from(relayMessages)
+      .where(eq(relayMessages.botId, botId))
+      .orderBy(desc(relayMessages.createdAt))
+      .limit(limit).all();
+  }
+
+  async getRelayMessagesByChatId(botId: number, telegramChatId: string, limit = 20): Promise<RelayMessage[]> {
+    return db.select().from(relayMessages)
+      .where(and(eq(relayMessages.botId, botId), eq(relayMessages.telegramChatId, telegramChatId)))
+      .orderBy(desc(relayMessages.createdAt))
+      .limit(limit).all();
   }
 }
 
