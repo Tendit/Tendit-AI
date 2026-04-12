@@ -156,6 +156,17 @@ export const providerKeys = sqliteTable("provider_keys", {
   createdAt: text("created_at").notNull().default(new Date().toISOString()),
 });
 
+// Sessions table — persists across server restarts
+export const sessions = sqliteTable("sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  token: text("token").notNull().unique(),
+  userId: integer("user_id").notNull(),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  expiresAt: text("expires_at").notNull(), // ISO date string
+});
+
+export type Session = typeof sessions.$inferSelect;
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,

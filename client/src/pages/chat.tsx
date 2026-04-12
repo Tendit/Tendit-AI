@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useAuth, useAuthFetch } from "@/lib/auth";
+import { useAuth, useAuthFetch, triggerLogoutOn401 } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -212,6 +212,10 @@ export default function ChatPage() {
       });
 
       if (!res.ok && !res.headers.get("content-type")?.includes("text/event-stream")) {
+        if (res.status === 401) {
+          triggerLogoutOn401();
+          throw new Error("Session expired. Please log in again.");
+        }
         const err = await res.json();
         throw new Error(err.message || "Agent request failed");
       }

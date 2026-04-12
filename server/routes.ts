@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt } from "@shared/schema";
+import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable } from "@shared/schema";
 import type { AgentToolConfig, AgentToolRule } from "@shared/schema";
 import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from "./calendar-engine";
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
@@ -41,11 +41,34 @@ const upload = multer({
   },
 });
 
-// Session management
-const sessions = new Map<string, number>();
+// Session management — DB-backed, survives server restarts
+import { eq } from "drizzle-orm";
+import { db } from "./storage";
+
+const SESSION_TTL_DAYS = 30; // sessions last 30 days
 
 function generateToken(): string {
   return randomUUID() + "-" + randomUUID();
+}
+
+function getSessionUserId(token: string): number | undefined {
+  const session = db.select().from(sessionsTable).where(eq(sessionsTable.token, token)).get();
+  if (!session) return undefined;
+  // Check expiration
+  if (new Date(session.expiresAt) < new Date()) {
+    db.delete(sessionsTable).where(eq(sessionsTable.token, token)).run();
+    return undefined;
+  }
+  return session.userId;
+}
+
+function createSession(token: string, userId: number): void {
+  const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  db.insert(sessionsTable).values({ token, userId, expiresAt }).run();
+}
+
+function deleteSession(token: string): void {
+  db.delete(sessionsTable).where(eq(sessionsTable.token, token)).run();
 }
 
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -54,7 +77,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ message: "Unauthorized" });
   }
   const token = authHeader.replace("Bearer ", "");
-  const userId = sessions.get(token);
+  const userId = getSessionUserId(token);
   if (!userId) {
     return res.status(401).json({ message: "Invalid session" });
   }
@@ -69,7 +92,7 @@ async function adminMiddleware(req: Request, res: Response, next: NextFunction) 
     return res.status(401).json({ message: "Unauthorized" });
   }
   const token = authHeader.replace("Bearer ", "");
-  const userId = sessions.get(token);
+  const userId = getSessionUserId(token);
   if (!userId) {
     return res.status(401).json({ message: "Invalid session" });
   }
@@ -515,7 +538,7 @@ export async function registerRoutes(
       await storage.updateUserCredits(user.id, PLANS.free.credits);
 
       const token = generateToken();
-      sessions.set(token, user.id);
+      createSession(token, user.id);
 
       return res.json({
         token,
@@ -540,7 +563,7 @@ export async function registerRoutes(
       if (!valid) return res.status(400).json({ message: "Invalid credentials" });
 
       const token = generateToken();
-      sessions.set(token, user.id);
+      createSession(token, user.id);
 
       return res.json({
         token,
@@ -552,7 +575,7 @@ export async function registerRoutes(
   });
 
   app.post("/api/auth/logout", authMiddleware, (req, res) => {
-    sessions.delete((req as any).token);
+    deleteSession((req as any).token);
     return res.json({ message: "Logged out" });
   });
 

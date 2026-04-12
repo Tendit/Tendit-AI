@@ -25,6 +25,12 @@ const AuthContext = createContext<AuthContextType | null>(null);
 // In-memory token storage (no localStorage in sandboxed iframe)
 let memoryToken: string | null = null;
 
+// Global logout trigger for 401 handling
+let globalLogoutFn: (() => void) | null = null;
+export function triggerLogoutOn401() {
+  if (globalLogoutFn) globalLogoutFn();
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(memoryToken);
@@ -85,6 +91,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAuth(null, null);
   }, [setAuth]);
 
+  // Register global logout handler for 401 interception
+  useEffect(() => {
+    globalLogoutFn = logout;
+    return () => { globalLogoutFn = null; };
+  }, [logout]);
+
   return (
     <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, refreshUser }}>
       {children}
@@ -111,6 +123,11 @@ export function useAuthFetch() {
       headers,
       body: isFormData ? data : data ? JSON.stringify(data) : undefined,
     });
+    if (res.status === 401) {
+      // Session expired or invalid — auto-logout
+      triggerLogoutOn401();
+      throw new Error("Session expired. Please log in again.");
+    }
     if (!res.ok) {
       const text = await res.text();
       throw new Error(text || res.statusText);
