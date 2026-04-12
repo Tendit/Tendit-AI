@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Zap, Languages } from "lucide-react";
+import { Languages } from "lucide-react";
 import { LocaleToggle } from "@/components/locale-toggle";
 
 export default function AuthPage() {
@@ -65,11 +65,9 @@ export default function AuthPage() {
         <LocaleToggle />
       </div>
       <div className="w-full max-w-md">
-        <div className="flex items-center justify-center gap-2 mb-8">
-          <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center">
-            <Zap className="w-6 h-6 text-primary-foreground" />
-          </div>
-          <h1 className="text-xl font-bold">AI Proxy</h1>
+        <div className="flex flex-col items-center justify-center gap-3 mb-8">
+          <img src="/tendit-logo.jpg" alt="Tendit" className="w-16 h-16 rounded-xl object-cover" />
+          <h1 className="text-xl font-bold">Tendit</h1>
         </div>
 
         <Card>

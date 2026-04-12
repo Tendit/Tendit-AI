@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Zap, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -46,12 +46,10 @@ export function AppSidebar() {
     <Sidebar side={dir === "rtl" ? "right" : "left"}>
       <SidebarHeader className="p-4">
         <div className={`flex items-center gap-2 ${dir === "rtl" ? "flex-row-reverse" : ""}`}>
-          <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-            <Zap className="w-5 h-5 text-primary-foreground" />
-          </div>
+          <img src="/tendit-logo.jpg" alt="Tendit" className="w-8 h-8 rounded-lg object-cover" />
           <div className={dir === "rtl" ? "text-right" : ""}>
-            <div className="font-bold text-sm">AI Proxy</div>
-            <div className="text-xs text-muted-foreground">Perplexity API</div>
+            <div className="font-bold text-sm">Tendit</div>
+            <div className="text-xs text-muted-foreground">AI Platform</div>
           </div>
         </div>
       </SidebarHeader>
