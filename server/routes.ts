@@ -235,6 +235,56 @@ function buildMultimodalContent(text: string, attachments: any[], provider: stri
   return text;
 }
 
+// Sanitize messages for Perplexity: requires strict alternation (system?, then user/assistant alternating)
+function sanitizeMessagesForPerplexity(messages: any[]): any[] {
+  const result: any[] = [];
+  
+  // Collect all leading "user" messages that are injected context (system prompts, timeline, story arc)
+  // and merge them into a single system message
+  let systemParts: string[] = [];
+  let i = 0;
+  
+  // Gather consecutive user messages from the beginning (these are injected context)
+  while (i < messages.length && messages[i].role === "user" && i < messages.length - 1) {
+    // Check if next message is also user (indicating this is injected context, not a real user message)
+    if (i + 1 < messages.length && messages[i + 1].role === "user") {
+      systemParts.push(typeof messages[i].content === "string" ? messages[i].content : JSON.stringify(messages[i].content));
+      i++;
+    } else {
+      break;
+    }
+  }
+  
+  // If we collected system parts, add as a single system message
+  if (systemParts.length > 0) {
+    result.push({ role: "system", content: systemParts.join("\n\n") });
+  }
+  
+  // Process remaining messages, merging consecutive same-role messages
+  for (; i < messages.length; i++) {
+    const msg = messages[i];
+    const lastResult = result[result.length - 1];
+    if (lastResult && lastResult.role === msg.role && msg.role !== "system") {
+      // Merge consecutive same-role messages
+      const lastContent = typeof lastResult.content === "string" ? lastResult.content : JSON.stringify(lastResult.content);
+      const thisContent = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+      lastResult.content = lastContent + "\n\n" + thisContent;
+    } else {
+      result.push({ ...msg });
+    }
+  }
+  
+  // Final safety check: ensure it starts with system or user, and alternates properly
+  // If first non-system message is assistant, prepend a user message
+  const firstNonSystem = result.find(m => m.role !== "system");
+  if (firstNonSystem && firstNonSystem.role === "assistant") {
+    const idx = result.indexOf(firstNonSystem);
+    result.splice(idx, 0, { role: "user", content: "Continue." });
+  }
+  
+  return result;
+}
+
 // Helper to call different AI providers
 async function callProvider(provider: string, model: string, messages: any[], attachments?: any[]) {
   const providerKey = await storage.getProviderKey(provider);
@@ -262,10 +312,12 @@ async function callProvider(provider: string, model: string, messages: any[], at
 
   try {
     if (provider === "perplexity") {
+      // Perplexity requires strict message alternation: system?, user, assistant, user...
+      const sanitized = sanitizeMessagesForPerplexity(apiMessages);
       const res = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages: apiMessages }),
+        body: JSON.stringify({ model, messages: sanitized }),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
