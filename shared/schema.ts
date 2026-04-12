@@ -167,6 +167,107 @@ export const sessions = sqliteTable("sessions", {
 
 export type Session = typeof sessions.$inferSelect;
 
+// === PERSONAL AI AGENTS ===
+
+// Platform agents — created by admin, assigned to users
+export const platformAgents = sqliteTable("platform_agents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(), // "Johnny", "Sarah"
+  description: text("description"), // "Personal assistant & scheduler"
+  avatar: text("avatar"), // emoji or image URL
+  capabilities: text("capabilities").notNull().default("[]"), // JSON: ["create_event", "set_reminder", "set_alarm", "create_task"]
+  systemPrompt: text("system_prompt").notNull(), // AI instructions for this agent
+  ownerEmail: text("owner_email"), // real person behind the agent (for notifications)
+  ownerPhone: text("owner_phone"), // for future SMS/push
+  approvalMode: text("approval_mode").notNull().default("auto"), // "auto" = execute immediately, "request" = owner must approve
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type PlatformAgent = typeof platformAgents.$inferSelect;
+export const insertPlatformAgentSchema = createInsertSchema(platformAgents).omit({ id: true, createdAt: true });
+export type InsertPlatformAgent = z.infer<typeof insertPlatformAgentSchema>;
+
+// Agent ↔ User assignments (which users can talk to which agents)
+export const agentAssignments = sqliteTable("agent_assignments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  agentId: integer("agent_id").notNull(),
+  userId: integer("user_id").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  assignedAt: text("assigned_at").notNull().default(new Date().toISOString()),
+});
+
+export type AgentAssignment = typeof agentAssignments.$inferSelect;
+
+// Agent action requests (pending approval or completed)
+export const agentRequests = sqliteTable("agent_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  agentId: integer("agent_id").notNull(),
+  userId: integer("user_id").notNull(), // who made the request
+  conversationId: integer("conversation_id"),
+  actionType: text("action_type").notNull(), // "create_event", "set_reminder", "set_alarm", "create_task"
+  actionData: text("action_data").notNull(), // JSON with all extracted fields
+  status: text("status").notNull().default("pending"), // "pending", "approved", "declined", "auto_approved"
+  resolvedBy: integer("resolved_by"), // admin/owner userId who approved/declined
+  resolvedAt: text("resolved_at"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type AgentRequest = typeof agentRequests.$inferSelect;
+export const insertAgentRequestSchema = createInsertSchema(agentRequests).omit({ id: true, createdAt: true });
+export type InsertAgentRequest = z.infer<typeof insertAgentRequestSchema>;
+
+// User schedule — events, reminders, alarms, tasks created by agents
+export const scheduleItems = sqliteTable("schedule_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  agentId: integer("agent_id"), // which agent created it
+  requestId: integer("request_id"), // links to agent_requests
+  type: text("type").notNull(), // "event", "reminder", "alarm", "task"
+  title: text("title").notNull(),
+  date: text("date").notNull(), // YYYY-MM-DD
+  time: text("time"), // HH:MM
+  endTime: text("end_time"), // HH:MM
+  location: text("location"),
+  notes: text("notes"),
+  reminderMinutes: integer("reminder_minutes").default(60),
+  priority: text("priority").default("medium"), // high, medium, low
+  status: text("status").notNull().default("active"), // active, completed, dismissed
+  conversationId: integer("conversation_id"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type ScheduleItem = typeof scheduleItems.$inferSelect;
+export const insertScheduleItemSchema = createInsertSchema(scheduleItems).omit({ id: true, createdAt: true });
+export type InsertScheduleItem = z.infer<typeof insertScheduleItemSchema>;
+
+// Agent system prompt builder
+export function buildAgentChatPrompt(agent: PlatformAgent): string {
+  const today = new Date().toISOString().split("T")[0];
+  const now = new Date().toTimeString().split(" ")[0].substring(0, 5);
+  return `You are "${agent.name}" — an AI agent assistant. ${agent.description || ""}
+
+Today's date: ${today}, Current time: ${now}
+
+When the user's message contains a request that maps to one of your capabilities, extract the action as a JSON block wrapped in \`\`\`json ... \`\`\`. You can include MULTIPLE json blocks if the request implies multiple actions.
+
+Available actions: ${agent.capabilities}
+
+JSON formats:
+- Event: {"action": "create_event", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "endTime": "HH:MM", "location": "...", "reminderMinutes": 60, "notes": "..."}
+- Reminder: {"action": "set_reminder", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..."}
+- Alarm: {"action": "set_alarm", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM"}
+- Task: {"action": "create_task", "title": "...", "dueDate": "YYYY-MM-DD", "dueTime": "HH:MM", "priority": "high|medium|low", "notes": "..."}
+
+Rules:
+- Always infer the date if the user says "today", "tomorrow", "next Monday", etc.
+- Default reminder: 60 minutes before unless specified.
+- ALWAYS respond with BOTH the json block(s) AND a friendly human confirmation message.
+- If the message is just conversation (no action needed), respond normally without json.
+
+${agent.systemPrompt || ""}`;
+}
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,

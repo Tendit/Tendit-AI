@@ -1,8 +1,8 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS } from "@shared/schema";
-import type { AgentToolConfig, AgentToolRule } from "@shared/schema";
+import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS, buildAgentChatPrompt } from "@shared/schema";
+import type { AgentToolConfig, AgentToolRule, PlatformAgent } from "@shared/schema";
 import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from "./calendar-engine";
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
 import { captureUserEvent, buildUserStoryArc, buildStoryArcContextForChat } from "./story-arc";
@@ -1581,6 +1581,256 @@ export async function registerRoutes(
     const userId = parseInt(req.params.userId);
     const stats = await storage.getUserEventStats(userId);
     return res.json(stats);
+  });
+
+  // === PLATFORM AGENTS ===
+
+  // Admin: Create agent
+  app.post("/api/admin/agents", adminMiddleware, async (req, res) => {
+    try {
+      const { name, description, avatar, capabilities, systemPrompt, ownerEmail, ownerPhone, approvalMode } = req.body;
+      if (!name) return res.status(400).json({ message: "Name is required" });
+      const agent = await storage.createAgent({
+        name,
+        description: description || "",
+        avatar: avatar || "🤖",
+        capabilities: JSON.stringify(capabilities || ["create_event", "set_reminder", "set_alarm", "create_task"]),
+        systemPrompt: systemPrompt || "",
+        ownerEmail: ownerEmail || "",
+        ownerPhone: ownerPhone || "",
+        approvalMode: approvalMode || "auto",
+        isActive: true,
+      });
+      return res.json(agent);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: List all agents
+  app.get("/api/admin/agents", adminMiddleware, async (_req, res) => {
+    const agents = await storage.getAllAgents();
+    return res.json(agents);
+  });
+
+  // Admin: Update agent
+  app.patch("/api/admin/agents/:id", adminMiddleware, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates = req.body;
+      if (updates.capabilities && Array.isArray(updates.capabilities)) {
+        updates.capabilities = JSON.stringify(updates.capabilities);
+      }
+      const agent = await storage.updateAgent(id, updates);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      return res.json(agent);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: Delete agent
+  app.delete("/api/admin/agents/:id", adminMiddleware, async (req, res) => {
+    await storage.deleteAgent(parseInt(req.params.id));
+    return res.json({ message: "Agent deleted" });
+  });
+
+  // Admin: Assign agent to user
+  app.post("/api/admin/agents/:id/assign", adminMiddleware, async (req, res) => {
+    try {
+      const agentId = parseInt(req.params.id);
+      const { userId } = req.body;
+      if (!userId) return res.status(400).json({ message: "userId is required" });
+      const assignment = await storage.assignAgent(agentId, userId);
+      return res.json(assignment);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: Unassign agent from user
+  app.post("/api/admin/agents/:id/unassign", adminMiddleware, async (req, res) => {
+    try {
+      const agentId = parseInt(req.params.id);
+      const { userId } = req.body;
+      await storage.unassignAgent(agentId, userId);
+      return res.json({ message: "Agent unassigned" });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: Get agent assignments
+  app.get("/api/admin/agents/:id/assignments", adminMiddleware, async (req, res) => {
+    const assignments = await storage.getAgentAssignments(parseInt(req.params.id));
+    return res.json(assignments);
+  });
+
+  // Admin: Get all pending requests
+  app.get("/api/admin/agent-requests", adminMiddleware, async (req, res) => {
+    const agentId = req.query.agentId ? parseInt(req.query.agentId as string) : undefined;
+    const requests = await storage.getPendingRequests(agentId);
+    return res.json(requests);
+  });
+
+  // Admin: Approve/decline request
+  app.post("/api/admin/agent-requests/:id/resolve", adminMiddleware, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { status } = req.body; // "approved" or "declined"
+      const adminId = (req as any).userId;
+      if (!status || ![ "approved", "declined" ].includes(status)) {
+        return res.status(400).json({ message: "Status must be 'approved' or 'declined'" });
+      }
+      const request = await storage.resolveAgentRequest(id, status, adminId);
+      if (!request) return res.status(404).json({ message: "Request not found" });
+
+      // If approved, create the schedule item
+      if (status === "approved") {
+        const actionData = JSON.parse(request.actionData);
+        await storage.createScheduleItem({
+          userId: request.userId,
+          agentId: request.agentId,
+          requestId: request.id,
+          type: actionData.action === "create_event" ? "event" : actionData.action === "create_task" ? "task" : actionData.action === "set_alarm" ? "alarm" : "reminder",
+          title: actionData.title || "Untitled",
+          date: actionData.date || actionData.dueDate || new Date().toISOString().split("T")[0],
+          time: actionData.time || actionData.dueTime,
+          endTime: actionData.endTime,
+          location: actionData.location,
+          notes: actionData.notes,
+          reminderMinutes: actionData.reminderMinutes || actionData.reminder || 60,
+          priority: actionData.priority || "medium",
+          status: "active",
+          conversationId: request.conversationId,
+        });
+      }
+      return res.json(request);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // User: Get my assigned agents
+  app.get("/api/agents", authMiddleware, async (req, res) => {
+    const userId = (req as any).userId;
+    const agents = await storage.getUserAgents(userId);
+    return res.json(agents);
+  });
+
+  // User: Chat with agent (processes message through agent, extracts actions)
+  app.post("/api/agents/:id/chat", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const agentId = parseInt(req.params.id);
+      const { message, conversationId, model = "sonar" } = req.body;
+
+      // Verify user has access to this agent
+      const userAgents = await storage.getUserAgents(userId);
+      const agent = userAgents.find(a => a.id === agentId);
+      if (!agent) return res.status(403).json({ message: "You don't have access to this agent" });
+
+      // Build agent prompt and call AI
+      const agentPrompt = buildAgentChatPrompt(agent);
+      const result = await callProvider("perplexity", model, [
+        { role: "system", content: agentPrompt },
+        { role: "user", content: message },
+      ]);
+
+      // Parse response for action JSON blocks
+      const content = result.content;
+      const jsonBlocks: any[] = [];
+      const jsonRegex = /```json\s*\n?([\s\S]*?)\n?```/g;
+      let match;
+      while ((match = jsonRegex.exec(content)) !== null) {
+        try {
+          jsonBlocks.push(JSON.parse(match[1]));
+        } catch {}
+      }
+
+      // Process extracted actions
+      const actions: any[] = [];
+      for (const block of jsonBlocks) {
+        if (agent.approvalMode === "auto") {
+          // Auto-approve: create schedule item immediately
+          const request = await storage.createAgentRequest({
+            agentId,
+            userId,
+            conversationId,
+            actionType: block.action,
+            actionData: JSON.stringify(block),
+            status: "auto_approved",
+          });
+          const item = await storage.createScheduleItem({
+            userId,
+            agentId,
+            requestId: request.id,
+            type: block.action === "create_event" ? "event" : block.action === "create_task" ? "task" : block.action === "set_alarm" ? "alarm" : "reminder",
+            title: block.title || "Untitled",
+            date: block.date || block.dueDate || new Date().toISOString().split("T")[0],
+            time: block.time || block.dueTime,
+            endTime: block.endTime,
+            location: block.location,
+            notes: block.notes,
+            reminderMinutes: block.reminderMinutes || block.reminder || 60,
+            priority: block.priority || "medium",
+            status: "active",
+            conversationId,
+          });
+          actions.push({ ...block, status: "created", itemId: item.id, requestId: request.id });
+        } else {
+          // Request mode: create pending request
+          const request = await storage.createAgentRequest({
+            agentId,
+            userId,
+            conversationId,
+            actionType: block.action,
+            actionData: JSON.stringify(block),
+            status: "pending",
+          });
+          actions.push({ ...block, status: "pending_approval", requestId: request.id });
+        }
+      }
+
+      // Clean response text (remove JSON blocks for display)
+      const cleanContent = content.replace(/```json\s*\n?[\s\S]*?\n?```/g, "").trim();
+
+      return res.json({
+        content: cleanContent,
+        actions,
+        agentName: agent.name,
+        agentAvatar: agent.avatar,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // User: Get my schedule
+  app.get("/api/schedule", authMiddleware, async (req, res) => {
+    const userId = (req as any).userId;
+    const fromDate = req.query.from as string | undefined;
+    const items = await storage.getUserSchedule(userId, fromDate);
+    return res.json(items);
+  });
+
+  // User: Update schedule item (complete/dismiss)
+  app.patch("/api/schedule/:id", authMiddleware, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { status } = req.body;
+      const item = await storage.updateScheduleItem(id, { status });
+      if (!item) return res.status(404).json({ message: "Item not found" });
+      return res.json(item);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // User: Delete schedule item
+  app.delete("/api/schedule/:id", authMiddleware, async (req, res) => {
+    await storage.deleteScheduleItem(parseInt(req.params.id));
+    return res.json({ message: "Deleted" });
   });
 
   // === MEDIA GENERATION ===

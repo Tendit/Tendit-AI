@@ -29,6 +29,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "admin.aiRules": "AI Rules",
     "admin.agentTools": "Agent Tools",
     "admin.userTimeline": "User Timeline",
+    "admin.agents": "Agents",
+    "nav.schedule": "My Schedule",
     // Auth
     "auth.signIn": "Sign In",
     "auth.signUp": "Sign Up",
@@ -255,6 +257,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "admin.aiRules": "כללי AI",
     "admin.agentTools": "כלי סוכן",
     "admin.userTimeline": "ציר זמן משתמש",
+    "admin.agents": "סוכנים",
+    "nav.schedule": "לוח זמנים",
     // Auth
     "auth.signIn": "כניסה",
     "auth.signUp": "הרשמה",

@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -21,6 +21,7 @@ const navItemKeys = [
   { titleKey: "nav.chat", url: "/chat", icon: MessageSquare },
   { titleKey: "nav.apiKeys", url: "/keys", icon: Key },
   { titleKey: "nav.billing", url: "/billing", icon: CreditCard },
+  { titleKey: "nav.schedule", url: "/schedule", icon: Clock },
 ];
 
 const adminItemKeys = [
@@ -35,6 +36,7 @@ const adminItemKeys = [
   { titleKey: "admin.userTimeline", url: "/admin/timeline", icon: Activity },
   { titleKey: "admin.icoDashboard", url: "/admin/ico", icon: Coins },
   { titleKey: "admin.deployment", url: "/admin/deploy", icon: Rocket },
+  { titleKey: "admin.agents", url: "/admin/agents", icon: Bot },
 ];
 
 export function AppSidebar() {

@@ -27,6 +27,8 @@ import AdminTimelinePage from "@/pages/admin/admin-timeline";
 import AdminAgentToolsPage from "@/pages/admin/admin-agent-tools";
 import AdminICODemoPage from "@/pages/admin/admin-ico-demo";
 import AdminDeployPage from "@/pages/admin/admin-deploy";
+import AdminAgentsPage from "@/pages/admin/admin-agents";
+import SchedulePage from "@/pages/schedule";
 import { Skeleton } from "@/components/ui/skeleton";
 
 function AppRouter() {
@@ -47,6 +49,8 @@ function AppRouter() {
       <Route path="/admin/agent-tools" component={AdminAgentToolsPage} />
       <Route path="/admin/ico" component={AdminICODemoPage} />
       <Route path="/admin/deploy" component={AdminDeployPage} />
+      <Route path="/admin/agents" component={AdminAgentsPage} />
+      <Route path="/schedule" component={SchedulePage} />
       <Route component={NotFound} />
     </Switch>
   );

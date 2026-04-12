@@ -78,6 +78,10 @@ export default function ChatPage() {
   const [agentSteps, setAgentSteps] = useState<AgentStep[]>([]);
   const [agentArtifacts, setAgentArtifacts] = useState<{ filename: string; url: string; mimetype: string }[]>([]);
   const [dynamicTools, setDynamicTools] = useState<AgentTool[]>(REAL_TOOLS);
+  // Agent (personal assistant) state
+  const [myAgents, setMyAgents] = useState<{id: number; name: string; avatar: string | null; description: string | null; approvalMode: string}[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null);
+  const [agentChatActions, setAgentChatActions] = useState<any[]>([]); // actions from agent chat response
   // Media generation state
   const [genDialog, setGenDialog] = useState<"image" | "document" | "video" | null>(null);
   const [genPrompt, setGenPrompt] = useState("");
@@ -90,7 +94,14 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { loadConversations(); loadFeatures(); loadDynamicTools(); }, []);
+  useEffect(() => { loadConversations(); loadFeatures(); loadDynamicTools(); loadMyAgents(); }, []);
+
+  const loadMyAgents = async () => {
+    try {
+      const res = await authFetch("GET", "/api/agents");
+      setMyAgents(await res.json());
+    } catch {}
+  };
 
   const loadDynamicTools = async () => {
     try {
@@ -343,6 +354,11 @@ export default function ChatPage() {
       return sendAgentMessage(userMessage, currentAttachments);
     }
 
+    // Personal agent mode: use agent chat endpoint
+    if (selectedAgentId) {
+      return sendAgentChatMessage(userMessage, currentAttachments);
+    }
+
     const attachmentsJson = currentAttachments.length > 0 ? JSON.stringify(currentAttachments.map(a => ({ type: a.type, name: a.name, url: a.url, mimetype: a.mimetype, size: a.size }))) : undefined;
     const tempUserMsg: Message = { id: Date.now(), role: "user", content: userMessage, attachments: attachmentsJson, createdAt: new Date().toISOString() };
     setMessages((prev) => [...prev, tempUserMsg]);
@@ -399,7 +415,47 @@ export default function ChatPage() {
     setIsSending(false);
   };
 
-  const newConversation = () => { setActiveConvId(null); setMessages([]); setFollowUps([]); };
+  // Agent (personal assistant) chat sender
+  const sendAgentChatMessage = async (userMessage: string, currentAttachments: Attachment[]) => {
+    const tempUserMsg: Message = { id: Date.now(), role: "user", content: userMessage, createdAt: new Date().toISOString() };
+    setMessages((prev) => [...prev, tempUserMsg]);
+    setAgentChatActions([]);
+
+    try {
+      const res = await authFetch("POST", `/api/agents/${selectedAgentId}/chat`, {
+        message: userMessage,
+        conversationId: activeConvId,
+        model,
+      });
+      const data = await res.json();
+
+      if (!activeConvId && data.conversationId) {
+        setActiveConvId(data.conversationId);
+        loadConversations();
+      }
+
+      // Build assistant message with agent avatar
+      const agentMsg: Message = {
+        id: Date.now() + 1,
+        role: "assistant",
+        content: data.content || "",
+        createdAt: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev.filter(m => m.id !== tempUserMsg.id), { ...tempUserMsg }, agentMsg]);
+
+      // Show action confirmation cards
+      if (data.actions?.length > 0) {
+        setAgentChatActions(data.actions);
+      }
+
+      refreshUser();
+    } catch (err: any) {
+      setMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: `Error: ${err.message || "Agent chat failed"}`, createdAt: new Date().toISOString() }]);
+    }
+    setIsSending(false);
+  };
+
+  const newConversation = () => { setActiveConvId(null); setMessages([]); setFollowUps([]); setAgentChatActions([]); };
 
   const deleteConversation = async (id: number) => {
     try {
@@ -579,6 +635,55 @@ export default function ChatPage() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {/* Personal Agent selector */}
+            {myAgents.length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border ${
+                      selectedAgentId
+                        ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white border-emerald-500 shadow-md shadow-emerald-500/20"
+                        : "bg-background text-muted-foreground border-border hover:border-emerald-400 hover:text-emerald-600"
+                    }`}
+                    data-testid="toggle-agent-selector"
+                  >
+                    <Bot className="w-3.5 h-3.5" />
+                    {selectedAgentId
+                      ? (myAgents.find(a => a.id === selectedAgentId)?.avatar || "🤖") + " " + (myAgents.find(a => a.id === selectedAgentId)?.name || "Agent")
+                      : (dir === "rtl" ? "סוכן אישי" : "My Agents")
+                    }
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel className="text-xs">{dir === "rtl" ? "בחר סוכן" : "Select Agent"}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {selectedAgentId && (
+                    <DropdownMenuItem onClick={() => { setSelectedAgentId(null); setAgentChatActions([]); }} data-testid="agent-none">
+                      <X className="w-4 h-4 mr-2 text-muted-foreground" />
+                      <span>{dir === "rtl" ? "ללא סוכן" : "No Agent"}</span>
+                    </DropdownMenuItem>
+                  )}
+                  {myAgents.map(agent => (
+                    <DropdownMenuItem
+                      key={agent.id}
+                      onClick={() => { setSelectedAgentId(agent.id); setAgentMode(false); setActiveTool(null); setAgentChatActions([]); }}
+                      className={selectedAgentId === agent.id ? "bg-accent" : ""}
+                      data-testid={`agent-select-${agent.id}`}
+                    >
+                      <span className="text-base mr-2">{agent.avatar || "🤖"}</span>
+                      <div className="flex-1">
+                        <div className="font-medium text-sm">{agent.name}</div>
+                        {agent.description && <div className="text-xs text-muted-foreground truncate max-w-[180px]">{agent.description}</div>}
+                      </div>
+                      <Badge variant="outline" className="text-[9px] ml-2">
+                        {agent.approvalMode === "auto" ? (dir === "rtl" ? "אוטו" : "Auto") : (dir === "rtl" ? "בקשה" : "Request")}
+                      </Badge>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+
             {/* Agent Mode toggle */}
             <Tooltip>
               <TooltipTrigger asChild>
@@ -623,6 +728,27 @@ export default function ChatPage() {
                 </span>
               );
             })}
+          </div>
+        )}
+
+        {/* Personal agent info bar */}
+        {selectedAgentId && !agentMode && (
+          <div className="flex items-center gap-2 px-4 py-2 border-b bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/20 dark:to-teal-950/20">
+            <span className="text-lg">{myAgents.find(a => a.id === selectedAgentId)?.avatar || "🤖"}</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                {dir === "rtl" ? "מדבר עם" : "Talking to"} {myAgents.find(a => a.id === selectedAgentId)?.name}
+              </span>
+              {myAgents.find(a => a.id === selectedAgentId)?.description && (
+                <span className="text-xs text-muted-foreground ml-2">— {myAgents.find(a => a.id === selectedAgentId)?.description}</span>
+              )}
+            </div>
+            <Badge variant="outline" className="text-xs text-emerald-600 dark:text-emerald-400 border-emerald-300">
+              {myAgents.find(a => a.id === selectedAgentId)?.approvalMode === "auto" ? (dir === "rtl" ? "ביצוע אוטומטי" : "Auto-execute") : (dir === "rtl" ? "דורש אישור" : "Needs approval")}
+            </Badge>
+            <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => { setSelectedAgentId(null); setAgentChatActions([]); }}>
+              <X className="w-3 h-3" />
+            </Button>
           </div>
         )}
 
@@ -830,6 +956,60 @@ export default function ChatPage() {
                     <span>{t("chat.agentThinking")}</span>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* Agent action confirmation cards */}
+            {agentChatActions.length > 0 && !isSending && (
+              <div className="space-y-2 pt-2" data-testid="agent-action-cards">
+                <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                  {dir === "rtl" ? "פעולות שבוצעו:" : "Actions executed:"}
+                </p>
+                {agentChatActions.map((action, i) => {
+                  const typeIcons: Record<string, any> = {
+                    create_event: CalendarDays,
+                    set_reminder: Clock,
+                    set_alarm: Clock,
+                    create_task: CheckCircle2,
+                  };
+                  const ActionIcon = typeIcons[action.action] || Sparkles;
+                  const isApproved = action.status === "created" || action.status === "auto_approved";
+                  const isPending = action.status === "pending_approval";
+                  return (
+                    <div
+                      key={i}
+                      className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
+                        isApproved ? "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800" :
+                        isPending ? "bg-yellow-50 dark:bg-yellow-950/20 border-yellow-200 dark:border-yellow-800" :
+                        "bg-card border"
+                      }`}
+                      data-testid={`action-card-${i}`}
+                    >
+                      <div className={`p-1.5 rounded-md ${
+                        isApproved ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600" :
+                        isPending ? "bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600" :
+                        "bg-muted text-muted-foreground"
+                      }`}>
+                        <ActionIcon className="w-4 h-4" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">{action.title || "Untitled"}</span>
+                          <Badge variant={isApproved ? "default" : "secondary"} className="text-[10px]">
+                            {isApproved ? (dir === "rtl" ? "✓ נוצר" : "✓ Created") : isPending ? (dir === "rtl" ? "ממתין לאישור" : "Pending approval") : action.status}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
+                          <span className="capitalize">{(action.action || "").replace("_", " ")}</span>
+                          {action.date && <span className="flex items-center gap-1"><CalendarDays className="w-3 h-3" />{action.date}</span>}
+                          {action.time && <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{action.time}{action.endTime ? ` - ${action.endTime}` : ""}</span>}
+                          {action.location && <span>📍 {action.location}</span>}
+                        </div>
+                        {action.notes && <p className="text-xs text-muted-foreground mt-1 truncate">{action.notes}</p>}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
 

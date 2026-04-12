@@ -9,8 +9,11 @@ import {
   type RateLimitRule, type InsertRateLimitRule, rateLimitRules,
   type CalendarEvent, type InsertCalendarEvent, calendarEvents,
   type AiRule, type InsertAiRule, aiRules,
-  type UserEvent, type InsertUserEvent, userEvents,
   type Artifact, type InsertArtifact, artifacts,
+  type PlatformAgent, type InsertPlatformAgent, platformAgents,
+  type AgentAssignment, agentAssignments,
+  type AgentRequest, type InsertAgentRequest, agentRequests,
+  type ScheduleItem, type InsertScheduleItem, scheduleItems,
   type AgentToolConfig, type InsertAgentToolConfig, agentToolsConfig,
   type AgentToolRule, type InsertAgentToolRule, agentToolRules,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
@@ -848,6 +851,107 @@ export class DatabaseStorage implements IStorage {
 
   async deleteToolRule(id: number): Promise<void> {
     db.delete(agentToolRules).where(eq(agentToolRules.id, id)).run();
+  }
+
+  // === Platform Agents ===
+  async createAgent(data: InsertPlatformAgent): Promise<PlatformAgent> {
+    return db.insert(platformAgents).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  async getAgent(id: number): Promise<PlatformAgent | undefined> {
+    return db.select().from(platformAgents).where(eq(platformAgents.id, id)).get();
+  }
+
+  async getAllAgents(): Promise<PlatformAgent[]> {
+    return db.select().from(platformAgents).orderBy(desc(platformAgents.createdAt)).all();
+  }
+
+  async updateAgent(id: number, data: Partial<InsertPlatformAgent>): Promise<PlatformAgent | undefined> {
+    return db.update(platformAgents).set(data).where(eq(platformAgents.id, id)).returning().get();
+  }
+
+  async deleteAgent(id: number): Promise<void> {
+    db.delete(agentAssignments).where(eq(agentAssignments.agentId, id)).run();
+    db.delete(platformAgents).where(eq(platformAgents.id, id)).run();
+  }
+
+  // === Agent Assignments ===
+  async assignAgent(agentId: number, userId: number): Promise<AgentAssignment> {
+    // Check if already assigned
+    const existing = db.select().from(agentAssignments)
+      .where(and(eq(agentAssignments.agentId, agentId), eq(agentAssignments.userId, userId))).get();
+    if (existing) {
+      return db.update(agentAssignments).set({ isActive: true }).where(eq(agentAssignments.id, existing.id)).returning().get();
+    }
+    return db.insert(agentAssignments).values({ agentId, userId, assignedAt: new Date().toISOString() }).returning().get();
+  }
+
+  async unassignAgent(agentId: number, userId: number): Promise<void> {
+    db.update(agentAssignments).set({ isActive: false })
+      .where(and(eq(agentAssignments.agentId, agentId), eq(agentAssignments.userId, userId))).run();
+  }
+
+  async getUserAgents(userId: number): Promise<PlatformAgent[]> {
+    const assignments = db.select().from(agentAssignments)
+      .where(and(eq(agentAssignments.userId, userId), eq(agentAssignments.isActive, true))).all();
+    if (assignments.length === 0) return [];
+    const agentIds = assignments.map(a => a.agentId);
+    return db.select().from(platformAgents)
+      .where(and(eq(platformAgents.isActive, true), sql`${platformAgents.id} IN (${sql.join(agentIds.map(id => sql`${id}`), sql`,`)})`)).all();
+  }
+
+  async getAgentAssignments(agentId: number): Promise<AgentAssignment[]> {
+    return db.select().from(agentAssignments)
+      .where(and(eq(agentAssignments.agentId, agentId), eq(agentAssignments.isActive, true))).all();
+  }
+
+  // === Agent Requests ===
+  async createAgentRequest(data: InsertAgentRequest): Promise<AgentRequest> {
+    return db.insert(agentRequests).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  async getAgentRequest(id: number): Promise<AgentRequest | undefined> {
+    return db.select().from(agentRequests).where(eq(agentRequests.id, id)).get();
+  }
+
+  async getPendingRequests(agentId?: number): Promise<AgentRequest[]> {
+    if (agentId) {
+      return db.select().from(agentRequests)
+        .where(and(eq(agentRequests.agentId, agentId), eq(agentRequests.status, "pending")))
+        .orderBy(desc(agentRequests.createdAt)).all();
+    }
+    return db.select().from(agentRequests)
+      .where(eq(agentRequests.status, "pending"))
+      .orderBy(desc(agentRequests.createdAt)).all();
+  }
+
+  async resolveAgentRequest(id: number, status: "approved" | "declined", resolvedBy: number): Promise<AgentRequest | undefined> {
+    return db.update(agentRequests).set({ status, resolvedBy, resolvedAt: new Date().toISOString() })
+      .where(eq(agentRequests.id, id)).returning().get();
+  }
+
+  // === Schedule Items ===
+  async createScheduleItem(data: InsertScheduleItem): Promise<ScheduleItem> {
+    return db.insert(scheduleItems).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  async getUserSchedule(userId: number, fromDate?: string): Promise<ScheduleItem[]> {
+    const dateFilter = fromDate || new Date().toISOString().split("T")[0];
+    return db.select().from(scheduleItems)
+      .where(and(
+        eq(scheduleItems.userId, userId),
+        eq(scheduleItems.status, "active"),
+        gte(scheduleItems.date, dateFilter)
+      ))
+      .orderBy(scheduleItems.date, scheduleItems.time).all();
+  }
+
+  async updateScheduleItem(id: number, data: Partial<InsertScheduleItem>): Promise<ScheduleItem | undefined> {
+    return db.update(scheduleItems).set(data).where(eq(scheduleItems.id, id)).returning().get();
+  }
+
+  async deleteScheduleItem(id: number): Promise<void> {
+    db.delete(scheduleItems).where(eq(scheduleItems.id, id)).run();
   }
 }
 
