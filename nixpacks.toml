@@ -8,4 +8,4 @@ cmds = ["npm ci"]
 cmds = ["npm run build"]
 
 [start]
-cmd = "NODE_ENV=production node dist/index.cjs"
+cmd = "node dist/index.cjs"
