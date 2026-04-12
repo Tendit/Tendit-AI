@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable } from "@shared/schema";
+import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS } from "@shared/schema";
 import type { AgentToolConfig, AgentToolRule } from "@shared/schema";
 import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from "./calendar-engine";
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
@@ -1581,6 +1581,195 @@ export async function registerRoutes(
     const userId = parseInt(req.params.userId);
     const stats = await storage.getUserEventStats(userId);
     return res.json(stats);
+  });
+
+  // === MEDIA GENERATION ===
+
+  // Image generation via OpenAI DALL-E 3
+  app.post("/api/generate/image", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { prompt, size = "1024x1024", quality = "standard", conversationId } = req.body;
+      if (!prompt) return res.status(400).json({ message: "Prompt is required" });
+
+      const settings = await storage.getAllSettings();
+      const marginMultiplier = parseFloat(settings.profit_margin_multiplier || "2");
+      const costKey = quality === "hd" ? "image-hd" : "image-standard";
+      const baseCost = MEDIA_COSTS[costKey];
+      const totalCost = applyMargin(baseCost, marginMultiplier);
+
+      if (user.credits < totalCost) {
+        return res.status(402).json({ message: `Not enough credits. Need ${totalCost}, have ${user.credits}` });
+      }
+
+      const openaiKey = await storage.getProviderKey("openai");
+      if (!openaiKey?.apiKey) {
+        return res.status(400).json({ message: "OpenAI API key not configured. Set it in Admin > Providers." });
+      }
+
+      const dalleRes = await fetch("https://api.openai.com/v1/images/generations", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${openaiKey.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "dall-e-3",
+          prompt,
+          n: 1,
+          size: ["1024x1024", "1792x1024", "1024x1792"].includes(size) ? size : "1024x1024",
+          quality: quality === "hd" ? "hd" : "standard",
+          response_format: "url",
+        }),
+      });
+
+      if (!dalleRes.ok) {
+        const err = await dalleRes.text();
+        return res.status(500).json({ message: `Image generation failed: ${err}` });
+      }
+
+      const dalleData = await dalleRes.json();
+      const imageUrl = dalleData.data?.[0]?.url;
+      const revisedPrompt = dalleData.data?.[0]?.revised_prompt;
+
+      if (!imageUrl) {
+        return res.status(500).json({ message: "No image returned from API" });
+      }
+
+      // Download and store the image locally
+      const imgResponse = await fetch(imageUrl);
+      const imgBuffer = Buffer.from(await imgResponse.arrayBuffer());
+      const filename = `gen_${Date.now()}_${Math.random().toString(36).substring(7)}.png`;
+      const fs = await import("fs");
+      fs.writeFileSync(path.join(UPLOADS_DIR, filename), imgBuffer);
+
+      // Deduct credits
+      await storage.updateUserCredits(userId, user.credits - totalCost);
+
+      // Log usage
+      await storage.createUsageLog({
+        userId,
+        model: "dall-e-3",
+        provider: "openai",
+        inputTokens: 0,
+        outputTokens: 0,
+        creditsUsed: totalCost,
+        endpoint: "generate/image",
+      });
+
+      // Save as assistant message in conversation if provided
+      if (conversationId) {
+        await storage.createMessage(conversationId, "user", `🎨 Generate image: ${prompt}`);
+        await storage.createMessage(
+          conversationId, "assistant",
+          `![Generated Image](/api/uploads/${filename})\n\n${revisedPrompt ? `*${revisedPrompt}*` : ""}`,
+          "dall-e-3", "openai", totalCost
+        );
+      }
+
+      return res.json({
+        url: `/api/uploads/${filename}`,
+        revisedPrompt,
+        cost: totalCost,
+        size,
+        quality,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Document generation via AI
+  app.post("/api/generate/document", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { prompt, format = "markdown", title, conversationId } = req.body;
+      if (!prompt) return res.status(400).json({ message: "Prompt is required" });
+
+      const settings = await storage.getAllSettings();
+      const marginMultiplier = parseFloat(settings.profit_margin_multiplier || "2");
+      const baseCost = MEDIA_COSTS["document-pdf"];
+      const totalCost = applyMargin(baseCost, marginMultiplier);
+
+      if (user.credits < totalCost) {
+        return res.status(402).json({ message: `Not enough credits. Need ${totalCost}, have ${user.credits}` });
+      }
+
+      // Use the best available model to generate the document
+      const docPrompt = `You are a professional document writer. Generate a well-structured ${format === "html" ? "HTML" : "Markdown"} document based on the following request. Include proper headings, sections, and formatting. Be thorough and professional.\n\nTitle: ${title || "Document"}\nRequest: ${prompt}\n\n${format === "html" ? "Generate valid HTML with inline CSS styling for a professional look. Wrap in a complete HTML document with proper head/body tags, a clean sans-serif font, and good spacing." : "Generate well-formatted Markdown with proper headings, lists, and sections."}`;
+
+      const result = await callProvider("openai", "gpt-4o", [
+        { role: "system", content: docPrompt },
+        { role: "user", content: prompt },
+      ]);
+
+      const docContent = result.content;
+      const ext = format === "html" ? "html" : "md";
+      const filename = `doc_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+      const fs = await import("fs");
+      fs.writeFileSync(path.join(UPLOADS_DIR, filename), docContent);
+
+      // Deduct credits
+      await storage.updateUserCredits(userId, user.credits - totalCost);
+
+      await storage.createUsageLog({
+        userId,
+        model: "gpt-4o",
+        provider: "openai",
+        inputTokens: result.usage?.prompt_tokens || 0,
+        outputTokens: result.usage?.completion_tokens || 0,
+        creditsUsed: totalCost,
+        endpoint: "generate/document",
+      });
+
+      // Save to conversation if provided
+      if (conversationId) {
+        await storage.createMessage(conversationId, "user", `📄 Generate document: ${prompt}`);
+        await storage.createMessage(
+          conversationId, "assistant",
+          `Document generated: **${title || "Document"}** ([Download](/api/uploads/${filename}))\n\n${docContent.substring(0, 500)}${docContent.length > 500 ? "..." : ""}`,
+          "gpt-4o", "openai", totalCost
+        );
+      }
+
+      return res.json({
+        url: `/api/uploads/${filename}`,
+        filename,
+        format,
+        cost: totalCost,
+        preview: docContent.substring(0, 200),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Video generation (placeholder — future integration)
+  app.post("/api/generate/video", authMiddleware, async (_req, res) => {
+    return res.status(501).json({
+      message: "Video generation coming soon. We're integrating with leading video AI providers.",
+      status: "coming_soon",
+    });
+  });
+
+  // Get media generation pricing
+  app.get("/api/generate/pricing", async (_req, res) => {
+    const settings = await storage.getAllSettings();
+    const marginMultiplier = parseFloat(settings.profit_margin_multiplier || "2");
+    return res.json({
+      image: {
+        standard: applyMargin(MEDIA_COSTS["image-standard"], marginMultiplier),
+        hd: applyMargin(MEDIA_COSTS["image-hd"], marginMultiplier),
+      },
+      document: {
+        pdf: applyMargin(MEDIA_COSTS["document-pdf"], marginMultiplier),
+        docx: applyMargin(MEDIA_COSTS["document-docx"], marginMultiplier),
+      },
+      video: { status: "coming_soon", cost: 0 },
+    });
   });
 
   // === HEALTH CHECK ===

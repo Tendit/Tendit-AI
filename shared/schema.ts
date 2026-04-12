@@ -257,6 +257,17 @@ export const MODEL_COSTS: Record<string, number> = Object.fromEntries(
   MODELS.map((m) => [m.id, m.cost])
 );
 
+// Media generation costs (credits per generation)
+export const MEDIA_COSTS = {
+  "image-standard": 5,    // DALL-E 3 standard (1024x1024)
+  "image-hd": 8,          // DALL-E 3 HD (1792x1024)
+  "document-pdf": 3,      // AI-generated document
+  "document-docx": 3,     // AI-generated document  
+  "video-placeholder": 0, // Coming soon
+} as const;
+
+export type MediaType = "image" | "document" | "video";
+
 export const PROVIDERS = [
   { id: "perplexity", name: "Perplexity", color: "#01696F" },
   { id: "anthropic", name: "Anthropic", color: "#D97757" },

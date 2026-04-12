@@ -8,7 +8,11 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Send, Plus, Trash2, Bot, User, Coins, Globe, FileText, Code, BarChart3, Sparkles, ArrowRight, Shield, Clock, CalendarDays, Paperclip, X, Image, Music, Film, Terminal, Search, FileOutput, Zap, Download, ExternalLink, CheckCircle2, XCircle, Loader2, BrainCircuit } from "lucide-react";
+import { Send, Plus, Trash2, Bot, User, Coins, Globe, FileText, Code, BarChart3, Sparkles, ArrowRight, Shield, Clock, CalendarDays, Paperclip, X, Image, Music, Film, Terminal, Search, FileOutput, Zap, Download, ExternalLink, CheckCircle2, XCircle, Loader2, BrainCircuit, Wand2, FileDown, Video } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { MODELS, PROVIDERS, AGENT_TOOLS, REAL_TOOLS, applyMargin } from "@shared/schema";
 import type { AgentStep, AgentTool } from "@shared/schema";
 import ReactMarkdown from "react-markdown";
@@ -74,6 +78,15 @@ export default function ChatPage() {
   const [agentSteps, setAgentSteps] = useState<AgentStep[]>([]);
   const [agentArtifacts, setAgentArtifacts] = useState<{ filename: string; url: string; mimetype: string }[]>([]);
   const [dynamicTools, setDynamicTools] = useState<AgentTool[]>(REAL_TOOLS);
+  // Media generation state
+  const [genDialog, setGenDialog] = useState<"image" | "document" | "video" | null>(null);
+  const [genPrompt, setGenPrompt] = useState("");
+  const [genTitle, setGenTitle] = useState("");
+  const [genSize, setGenSize] = useState("1024x1024");
+  const [genQuality, setGenQuality] = useState("standard");
+  const [genFormat, setGenFormat] = useState("html");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [genResult, setGenResult] = useState<{ url: string; type: string; revisedPrompt?: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -167,6 +180,49 @@ export default function ChatPage() {
       handleFileSelect(e.dataTransfer.files);
     }
   }, [handleFileSelect]);
+
+  // Media generation handler
+  const handleGenerate = async () => {
+    if (!genPrompt.trim() || isGenerating) return;
+    setIsGenerating(true);
+    setGenResult(null);
+    try {
+      const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+      if (genDialog === "image") {
+        const res = await authFetch("POST", "/api/generate/image", {
+          prompt: genPrompt,
+          size: genSize,
+          quality: genQuality,
+          conversationId: activeConvId,
+        });
+        const data = await res.json();
+        setGenResult({ url: data.url, type: "image", revisedPrompt: data.revisedPrompt });
+        if (activeConvId) { loadMessages(activeConvId); refreshUser(); }
+      } else if (genDialog === "document") {
+        const res = await authFetch("POST", "/api/generate/document", {
+          prompt: genPrompt,
+          format: genFormat,
+          title: genTitle || undefined,
+          conversationId: activeConvId,
+        });
+        const data = await res.json();
+        setGenResult({ url: data.url, type: "document" });
+        if (activeConvId) { loadMessages(activeConvId); refreshUser(); }
+      } else if (genDialog === "video") {
+        setGenResult({ url: "", type: "coming_soon" });
+      }
+    } catch (e: any) {
+      setGenResult({ url: "", type: "error", revisedPrompt: e.message });
+    }
+    setIsGenerating(false);
+  };
+
+  const openGenDialog = (type: "image" | "document" | "video") => {
+    setGenDialog(type);
+    setGenPrompt("");
+    setGenTitle("");
+    setGenResult(null);
+  };
 
   const loadConversations = async () => {
     setIsLoading(true);
@@ -648,7 +704,24 @@ export default function ChatPage() {
                   {msg.role === "user" && renderAttachments(msg.attachments)}
                   {msg.role === "assistant" ? (
                     <div className="prose prose-sm dark:prose-invert max-w-none">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          img: ({ src, alt, ...props }) => {
+                            const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+                            const fullSrc = src?.startsWith("/") ? `${API_BASE}${src}` : src;
+                            return (
+                              <img
+                                src={fullSrc}
+                                alt={alt || ""}
+                                className="rounded-lg max-w-full my-2 border"
+                                loading="lazy"
+                                {...props}
+                              />
+                            );
+                          },
+                        }}
+                      >{msg.content}</ReactMarkdown>
                     </div>
                   ) : (
                     <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
@@ -859,6 +932,39 @@ export default function ChatPage() {
                 <TooltipContent>{t("chat.attachTooltip")}</TooltipContent>
               </Tooltip>
 
+              {/* Generate media dropdown */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0 h-11 w-11"
+                    data-testid="button-generate-media"
+                  >
+                    <Wand2 className="w-4 h-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuLabel className="text-xs">{dir === "rtl" ? "צור תוכן" : "Generate"}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => openGenDialog("image")} data-testid="gen-image">
+                    <Image className="w-4 h-4 mr-2" />
+                    <span>{dir === "rtl" ? "תמונה" : "Image"}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">DALL-E 3</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openGenDialog("document")} data-testid="gen-document">
+                    <FileDown className="w-4 h-4 mr-2" />
+                    <span>{dir === "rtl" ? "מסמך" : "Document"}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">GPT-4o</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openGenDialog("video")} data-testid="gen-video">
+                    <Video className="w-4 h-4 mr-2" />
+                    <span>{dir === "rtl" ? "וידאו" : "Video"}</span>
+                    <Badge variant="outline" className="ml-auto text-[9px] px-1">{dir === "rtl" ? "בקרוב" : "Soon"}</Badge>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
               <Textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -881,6 +987,160 @@ export default function ChatPage() {
           </div>
         </div>
       </div>
+
+      {/* Media Generation Dialog */}
+      <Dialog open={genDialog !== null} onOpenChange={(open) => { if (!open) setGenDialog(null); }}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {genDialog === "image" && <><Image className="w-5 h-5 text-purple-500" /> {dir === "rtl" ? "צור תמונה" : "Generate Image"}</>}
+              {genDialog === "document" && <><FileDown className="w-5 h-5 text-blue-500" /> {dir === "rtl" ? "צור מסמך" : "Generate Document"}</>}
+              {genDialog === "video" && <><Video className="w-5 h-5 text-rose-500" /> {dir === "rtl" ? "צור וידאו" : "Generate Video"}</>}
+            </DialogTitle>
+            <DialogDescription>
+              {genDialog === "image" && (dir === "rtl" ? "תאר מה שאתה רוצה לראות ו-DALL-E 3 ייצור את זה" : "Describe what you want to see and DALL-E 3 will create it")}
+              {genDialog === "document" && (dir === "rtl" ? "תאר את המסמך ו-AI יכתוב אותו" : "Describe the document and AI will write it for you")}
+              {genDialog === "video" && (dir === "rtl" ? "יצירת וידאו תהיה זמינה בקרוב" : "Video generation is coming soon")}
+            </DialogDescription>
+          </DialogHeader>
+
+          {genDialog === "video" ? (
+            <div className="py-8 text-center space-y-3">
+              <Video className="w-12 h-12 mx-auto text-muted-foreground opacity-50" />
+              <p className="text-sm text-muted-foreground">{dir === "rtl" ? "אנחנו משלבים עם ספקי וידאו מובילים. הישארו מעודכנים." : "We're integrating with leading video AI providers. Stay tuned."}</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {genDialog === "document" && (
+                <div className="space-y-2">
+                  <Label>{dir === "rtl" ? "כותרת" : "Title"}</Label>
+                  <Input
+                    value={genTitle}
+                    onChange={(e) => setGenTitle(e.target.value)}
+                    placeholder={dir === "rtl" ? "כותרת המסמך..." : "Document title..."}
+                    data-testid="gen-doc-title"
+                  />
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <Label>{dir === "rtl" ? "תיאור" : "Prompt"}</Label>
+                <Textarea
+                  value={genPrompt}
+                  onChange={(e) => setGenPrompt(e.target.value)}
+                  placeholder={genDialog === "image"
+                    ? (dir === "rtl" ? "תאר את התמונה שאתה רוצה ליצור..." : "Describe the image you want to create...")
+                    : (dir === "rtl" ? "תאר את המסמך שאתה רוצה..." : "Describe the document you need...")}
+                  rows={3}
+                  data-testid="gen-prompt-input"
+                />
+              </div>
+
+              {genDialog === "image" && (
+                <div className="flex gap-4">
+                  <div className="flex-1 space-y-2">
+                    <Label>{dir === "rtl" ? "גודל" : "Size"}</Label>
+                    <Select value={genSize} onValueChange={setGenSize}>
+                      <SelectTrigger data-testid="gen-size-select"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1024x1024">1024×1024</SelectItem>
+                        <SelectItem value="1792x1024">1792×1024 ({dir === "rtl" ? "רחב" : "Wide"})</SelectItem>
+                        <SelectItem value="1024x1792">1024×1792 ({dir === "rtl" ? "גבוה" : "Tall"})</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex-1 space-y-2">
+                    <Label>{dir === "rtl" ? "איכות" : "Quality"}</Label>
+                    <Select value={genQuality} onValueChange={setGenQuality}>
+                      <SelectTrigger data-testid="gen-quality-select"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="standard">Standard</SelectItem>
+                        <SelectItem value="hd">HD</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              )}
+
+              {genDialog === "document" && (
+                <div className="space-y-2">
+                  <Label>{dir === "rtl" ? "פורמט" : "Format"}</Label>
+                  <Select value={genFormat} onValueChange={setGenFormat}>
+                    <SelectTrigger data-testid="gen-format-select"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="html">HTML ({dir === "rtl" ? "מעוצב" : "Styled"})</SelectItem>
+                      <SelectItem value="markdown">Markdown</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {/* Generation result */}
+              {genResult && (
+                <div className="rounded-lg border p-3 space-y-2">
+                  {genResult.type === "error" ? (
+                    <div className="flex items-center gap-2 text-destructive text-sm">
+                      <XCircle className="w-4 h-4" />
+                      <span>{genResult.revisedPrompt || "Generation failed"}</span>
+                    </div>
+                  ) : genResult.type === "image" ? (
+                    <div className="space-y-2">
+                      <img
+                        src={`${"__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__"}${genResult.url}`}
+                        alt="Generated"
+                        className="w-full rounded-md"
+                      />
+                      {genResult.revisedPrompt && (
+                        <p className="text-xs text-muted-foreground italic">{genResult.revisedPrompt}</p>
+                      )}
+                      <a
+                        href={`${"__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__"}${genResult.url}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+                      >
+                        <Download className="w-3 h-3" /> {dir === "rtl" ? "הורד" : "Download"}
+                      </a>
+                    </div>
+                  ) : genResult.type === "document" ? (
+                    <div className="flex items-center gap-3">
+                      <FileDown className="w-8 h-8 text-blue-500" />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium">{dir === "rtl" ? "המסמך מוכן" : "Document ready"}</p>
+                        <a
+                          href={`${"__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__"}${genResult.url}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+                        >
+                          <Download className="w-3 h-3" /> {dir === "rtl" ? "הורד" : "Download"}
+                        </a>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          )}
+
+          {genDialog !== "video" && (
+            <DialogFooter>
+              <Button
+                onClick={handleGenerate}
+                disabled={!genPrompt.trim() || isGenerating}
+                className="gap-2"
+                data-testid="gen-submit"
+              >
+                {isGenerating ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> {dir === "rtl" ? "מייצר..." : "Generating..."}</>
+                ) : (
+                  <><Wand2 className="w-4 h-4" /> {dir === "rtl" ? "צור" : "Generate"}</>
+                )}
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
