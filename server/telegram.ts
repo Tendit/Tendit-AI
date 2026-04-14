@@ -85,17 +85,23 @@ export async function handleTelegramUpdate(bot: TelegramBot, agent: PlatformAgen
 
   // Ensure this Telegram user has a link entry
   let link = await storage.getTelegramLink(bot.id, chatId);
+  const noOwnerYet = !bot.ownerTelegramChatId;
   if (!link) {
-    // Auto-create link
-    const isOwner = bot.ownerTelegramChatId === chatId;
+    // Auto-create link — first person to message when no owner is set becomes owner
+    const isOwnerLink = bot.ownerTelegramChatId === chatId || noOwnerYet;
     link = await storage.createTelegramLink({
       telegramChatId: chatId,
       telegramUsername: username,
       telegramFirstName: firstName,
       botId: bot.id,
-      role: isOwner ? "owner" : "contact",
+      role: isOwnerLink ? "owner" : "contact",
       isActive: true,
     });
+    // If first person, also set the owner chat ID on the bot
+    if (noOwnerYet) {
+      await storage.updateTelegramBot(bot.id, { ownerTelegramChatId: chatId });
+      bot.ownerTelegramChatId = chatId;
+    }
   }
 
   // Log incoming message
@@ -134,10 +140,13 @@ async function handleCommand(bot: TelegramBot, agent: PlatformAgent, chatId: str
 
   switch (cmd.toLowerCase().replace(/@.*$/, "")) {
     case "/start": {
-      if (isOwner) {
-        // Update owner chat ID if needed
+      // If no owner is set yet, the person who /starts claims ownership
+      const claimOwner = isOwner || !bot.ownerTelegramChatId;
+      if (claimOwner) {
+        // Set owner chat ID
         if (bot.ownerTelegramChatId !== chatId) {
           await storage.updateTelegramBot(bot.id, { ownerTelegramChatId: chatId });
+          bot.ownerTelegramChatId = chatId;
         }
         if (link.role !== "owner") {
           await storage.updateTelegramLink(link.id, { role: "owner" });
