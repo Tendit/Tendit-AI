@@ -19,6 +19,13 @@ import {
   type TelegramBot, type InsertTelegramBot, telegramBots,
   type TelegramLink, type InsertTelegramLink, telegramLinks,
   type RelayMessage, type InsertRelayMessage, relayMessages,
+  type CrmConnection, type InsertCrmConnection, crmConnections,
+  type CrmCustomer, crmCustomers,
+  type CrmLead, crmLeads,
+  type CrmInvoice, crmInvoices,
+  type CrmProject, crmProjects,
+  type CrmTask, crmTasks,
+  type CrmTicket, crmTickets,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
   DEFAULT_AGENT_TOOLS, DEFAULT_AGENT_TOOL_RULES,
 } from "@shared/schema";
@@ -145,6 +152,28 @@ export interface IStorage {
   }[]>;
   getUserSentimentTrend(userId: number, limit?: number): Promise<{ date: string; sentiment: string }[]>;
   getAllUsersWithEvents(): Promise<{ userId: number; username: string; email: string; eventCount: number; lastEvent: string }[]>;
+
+  // CRM Integration
+  createCrmConnection(data: InsertCrmConnection): CrmConnection;
+  getCrmConnection(id: number): CrmConnection | undefined;
+  getCrmConnections(): CrmConnection[];
+  updateCrmConnection(id: number, data: Partial<InsertCrmConnection>): CrmConnection | undefined;
+  deleteCrmConnection(id: number): void;
+
+  upsertCrmCustomers(connectionId: number, customers: any[]): number;
+  upsertCrmLeads(connectionId: number, leads: any[]): number;
+  upsertCrmInvoices(connectionId: number, invoices: any[]): number;
+  upsertCrmProjects(connectionId: number, projects: any[]): number;
+  upsertCrmTasks(connectionId: number, tasks: any[]): number;
+  upsertCrmTickets(connectionId: number, tickets: any[]): number;
+
+  getCrmCustomers(connectionId: number, filters?: { search?: string; status?: string }): any[];
+  getCrmLeads(connectionId: number, filters?: { search?: string; status?: string }): any[];
+  getCrmInvoices(connectionId: number, filters?: { status?: string; overdue?: boolean }): any[];
+  getCrmProjects(connectionId: number, filters?: { status?: string }): any[];
+  getCrmTasks(connectionId: number, filters?: { status?: string; assignedTo?: string }): any[];
+  getCrmTickets(connectionId: number, filters?: { status?: string; priority?: string }): any[];
+  getCrmDashboardStats(connectionId: number): any;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1028,6 +1057,377 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(relayMessages.botId, botId), eq(relayMessages.telegramChatId, telegramChatId)))
       .orderBy(desc(relayMessages.createdAt))
       .limit(limit).all();
+  }
+
+  // === CRM Integration ===
+
+  createCrmConnection(data: InsertCrmConnection): CrmConnection {
+    return db.insert(crmConnections).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  getCrmConnection(id: number): CrmConnection | undefined {
+    return db.select().from(crmConnections).where(eq(crmConnections.id, id)).get();
+  }
+
+  getCrmConnections(): CrmConnection[] {
+    return db.select().from(crmConnections).orderBy(desc(crmConnections.createdAt)).all();
+  }
+
+  updateCrmConnection(id: number, data: Partial<InsertCrmConnection>): CrmConnection | undefined {
+    return db.update(crmConnections).set(data).where(eq(crmConnections.id, id)).returning().get();
+  }
+
+  deleteCrmConnection(id: number): void {
+    db.delete(crmConnections).where(eq(crmConnections.id, id)).run();
+  }
+
+  upsertCrmCustomers(connectionId: number, customers: any[]): number {
+    const now = new Date().toISOString();
+    for (const c of customers) {
+      const externalId = String(c.userid || c.id || c.externalId || "");
+      if (!externalId) continue;
+      const existing = db.select().from(crmCustomers)
+        .where(and(eq(crmCustomers.connectionId, connectionId), eq(crmCustomers.externalId, externalId))).get();
+      const row = {
+        connectionId,
+        externalId,
+        company: c.company || c.name || null,
+        email: c.email || null,
+        phone: c.phonenumber || c.phone || null,
+        address: c.address || null,
+        city: c.city || null,
+        country: c.country || null,
+        status: c.status || (c.active === "1" || c.active === 1 ? "active" : "inactive"),
+        totalInvoiced: c.total_invoiced != null ? String(c.total_invoiced) : null,
+        metadata: JSON.stringify(c),
+        syncedAt: now,
+      };
+      if (existing) {
+        db.update(crmCustomers).set(row).where(eq(crmCustomers.id, existing.id)).run();
+      } else {
+        db.insert(crmCustomers).values(row).run();
+      }
+    }
+    return customers.length;
+  }
+
+  upsertCrmLeads(connectionId: number, leads: any[]): number {
+    const now = new Date().toISOString();
+    for (const l of leads) {
+      const externalId = String(l.id || l.externalId || "");
+      if (!externalId) continue;
+      const existing = db.select().from(crmLeads)
+        .where(and(eq(crmLeads.connectionId, connectionId), eq(crmLeads.externalId, externalId))).get();
+      const row = {
+        connectionId,
+        externalId,
+        name: l.name || null,
+        email: l.email || null,
+        phone: l.phone || null,
+        company: l.company || null,
+        status: l.status || null,
+        source: l.source || null,
+        assignedTo: l.assigned_to || l.assignedTo || null,
+        value: l.value != null ? String(l.value) : null,
+        lastContact: l.last_contact || l.lastContact || null,
+        metadata: JSON.stringify(l),
+        syncedAt: now,
+      };
+      if (existing) {
+        db.update(crmLeads).set(row).where(eq(crmLeads.id, existing.id)).run();
+      } else {
+        db.insert(crmLeads).values(row).run();
+      }
+    }
+    return leads.length;
+  }
+
+  upsertCrmInvoices(connectionId: number, invoices: any[]): number {
+    const now = new Date().toISOString();
+    for (const inv of invoices) {
+      const externalId = String(inv.id || inv.externalId || "");
+      if (!externalId) continue;
+      const existing = db.select().from(crmInvoices)
+        .where(and(eq(crmInvoices.connectionId, connectionId), eq(crmInvoices.externalId, externalId))).get();
+      const row = {
+        connectionId,
+        externalId,
+        customerId: inv.client_id || inv.customerId ? String(inv.client_id || inv.customerId) : null,
+        customerName: inv.client_name || inv.customerName || null,
+        number: inv.number || inv.invoice_number || null,
+        date: inv.date || null,
+        dueDate: inv.duedate || inv.due_date || inv.dueDate || null,
+        total: inv.total != null ? String(inv.total) : null,
+        amountPaid: inv.amount_paid != null ? String(inv.amount_paid) : null,
+        status: inv.status || null,
+        currency: inv.currency || null,
+        items: inv.items ? JSON.stringify(inv.items) : null,
+        metadata: JSON.stringify(inv),
+        syncedAt: now,
+      };
+      if (existing) {
+        db.update(crmInvoices).set(row).where(eq(crmInvoices.id, existing.id)).run();
+      } else {
+        db.insert(crmInvoices).values(row).run();
+      }
+    }
+    return invoices.length;
+  }
+
+  upsertCrmProjects(connectionId: number, projects: any[]): number {
+    const now = new Date().toISOString();
+    for (const p of projects) {
+      const externalId = String(p.id || p.externalId || "");
+      if (!externalId) continue;
+      const existing = db.select().from(crmProjects)
+        .where(and(eq(crmProjects.connectionId, connectionId), eq(crmProjects.externalId, externalId))).get();
+      const row = {
+        connectionId,
+        externalId,
+        name: p.name || null,
+        customerName: p.client_name || p.customerName || null,
+        status: p.status || null,
+        startDate: p.start_date || p.startDate || null,
+        deadline: p.deadline || null,
+        progress: p.progress != null ? parseInt(p.progress) : null,
+        billingType: p.billing_type || p.billingType || null,
+        totalCost: p.project_cost != null ? String(p.project_cost) : p.totalCost != null ? String(p.totalCost) : null,
+        metadata: JSON.stringify(p),
+        syncedAt: now,
+      };
+      if (existing) {
+        db.update(crmProjects).set(row).where(eq(crmProjects.id, existing.id)).run();
+      } else {
+        db.insert(crmProjects).values(row).run();
+      }
+    }
+    return projects.length;
+  }
+
+  upsertCrmTasks(connectionId: number, tasks: any[]): number {
+    const now = new Date().toISOString();
+    for (const t of tasks) {
+      const externalId = String(t.id || t.externalId || "");
+      if (!externalId) continue;
+      const existing = db.select().from(crmTasks)
+        .where(and(eq(crmTasks.connectionId, connectionId), eq(crmTasks.externalId, externalId))).get();
+      const row = {
+        connectionId,
+        externalId,
+        name: t.name || null,
+        projectName: t.project_name || t.projectName || null,
+        assignedTo: t.assigned_to || t.assignedTo || null,
+        status: t.status || null,
+        priority: t.priority || null,
+        startDate: t.start_date || t.startDate || null,
+        dueDate: t.duedate || t.due_date || t.dueDate || null,
+        metadata: JSON.stringify(t),
+        syncedAt: now,
+      };
+      if (existing) {
+        db.update(crmTasks).set(row).where(eq(crmTasks.id, existing.id)).run();
+      } else {
+        db.insert(crmTasks).values(row).run();
+      }
+    }
+    return tasks.length;
+  }
+
+  upsertCrmTickets(connectionId: number, tickets: any[]): number {
+    const now = new Date().toISOString();
+    for (const t of tickets) {
+      const externalId = String(t.id || t.externalId || "");
+      if (!externalId) continue;
+      const existing = db.select().from(crmTickets)
+        .where(and(eq(crmTickets.connectionId, connectionId), eq(crmTickets.externalId, externalId))).get();
+      const row = {
+        connectionId,
+        externalId,
+        subject: t.subject || null,
+        customerName: t.name || t.customerName || null,
+        department: t.department || null,
+        status: t.status || null,
+        priority: t.priority || null,
+        lastReply: t.last_reply || t.lastReply || null,
+        metadata: JSON.stringify(t),
+        syncedAt: now,
+      };
+      if (existing) {
+        db.update(crmTickets).set(row).where(eq(crmTickets.id, existing.id)).run();
+      } else {
+        db.insert(crmTickets).values(row).run();
+      }
+    }
+    return tickets.length;
+  }
+
+  getCrmCustomers(connectionId: number, filters?: { search?: string; status?: string }): any[] {
+    let q = db.select().from(crmCustomers).where(eq(crmCustomers.connectionId, connectionId));
+    const results = q.all();
+    let filtered = results;
+    if (filters?.status) {
+      filtered = filtered.filter(c => c.status === filters.status);
+    }
+    if (filters?.search) {
+      const s = filters.search.toLowerCase();
+      filtered = filtered.filter(c =>
+        (c.company || "").toLowerCase().includes(s) ||
+        (c.email || "").toLowerCase().includes(s) ||
+        (c.phone || "").includes(s)
+      );
+    }
+    return filtered;
+  }
+
+  getCrmLeads(connectionId: number, filters?: { search?: string; status?: string }): any[] {
+    const results = db.select().from(crmLeads).where(eq(crmLeads.connectionId, connectionId)).all();
+    let filtered = results;
+    if (filters?.status) {
+      filtered = filtered.filter(l => l.status === filters.status);
+    }
+    if (filters?.search) {
+      const s = filters.search.toLowerCase();
+      filtered = filtered.filter(l =>
+        (l.name || "").toLowerCase().includes(s) ||
+        (l.email || "").toLowerCase().includes(s) ||
+        (l.company || "").toLowerCase().includes(s)
+      );
+    }
+    return filtered;
+  }
+
+  getCrmInvoices(connectionId: number, filters?: { status?: string; overdue?: boolean }): any[] {
+    const results = db.select().from(crmInvoices).where(eq(crmInvoices.connectionId, connectionId)).all();
+    let filtered = results;
+    if (filters?.status) {
+      filtered = filtered.filter(i => i.status === filters.status);
+    }
+    if (filters?.overdue) {
+      const today = new Date().toISOString().split("T")[0];
+      filtered = filtered.filter(i =>
+        i.status !== "paid" && i.status !== "cancelled" &&
+        i.dueDate != null && i.dueDate < today
+      );
+    }
+    return filtered;
+  }
+
+  getCrmProjects(connectionId: number, filters?: { status?: string }): any[] {
+    const results = db.select().from(crmProjects).where(eq(crmProjects.connectionId, connectionId)).all();
+    if (filters?.status) {
+      return results.filter(p => p.status === filters.status);
+    }
+    return results;
+  }
+
+  getCrmTasks(connectionId: number, filters?: { status?: string; assignedTo?: string }): any[] {
+    const results = db.select().from(crmTasks).where(eq(crmTasks.connectionId, connectionId)).all();
+    let filtered = results;
+    if (filters?.status) {
+      filtered = filtered.filter(t => t.status === filters.status);
+    }
+    if (filters?.assignedTo) {
+      const a = filters.assignedTo.toLowerCase();
+      filtered = filtered.filter(t => (t.assignedTo || "").toLowerCase().includes(a));
+    }
+    return filtered;
+  }
+
+  getCrmTickets(connectionId: number, filters?: { status?: string; priority?: string }): any[] {
+    const results = db.select().from(crmTickets).where(eq(crmTickets.connectionId, connectionId)).all();
+    let filtered = results;
+    if (filters?.status) {
+      filtered = filtered.filter(t => t.status === filters.status);
+    }
+    if (filters?.priority) {
+      filtered = filtered.filter(t => t.priority === filters.priority);
+    }
+    return filtered;
+  }
+
+  getCrmDashboardStats(connectionId: number): any {
+    const today = new Date().toISOString().split("T")[0];
+
+    const customers = db.select().from(crmCustomers).where(eq(crmCustomers.connectionId, connectionId)).all();
+    const leads = db.select().from(crmLeads).where(eq(crmLeads.connectionId, connectionId)).all();
+    const invoices = db.select().from(crmInvoices).where(eq(crmInvoices.connectionId, connectionId)).all();
+    const projects = db.select().from(crmProjects).where(eq(crmProjects.connectionId, connectionId)).all();
+    const tasks = db.select().from(crmTasks).where(eq(crmTasks.connectionId, connectionId)).all();
+    const tickets = db.select().from(crmTickets).where(eq(crmTickets.connectionId, connectionId)).all();
+
+    // Customer stats
+    const customerStats = {
+      total: customers.length,
+      active: customers.filter(c => c.status === "active").length,
+    };
+
+    // Lead stats
+    const leadsByStatus: Record<string, number> = {};
+    for (const l of leads) {
+      const s = l.status || "unknown";
+      leadsByStatus[s] = (leadsByStatus[s] || 0) + 1;
+    }
+    const leadStats = { total: leads.length, byStatus: leadsByStatus };
+
+    // Invoice stats
+    let totalValue = 0;
+    let overdueValue = 0;
+    const paidCount = invoices.filter(i => i.status === "paid").length;
+    const unpaidCount = invoices.filter(i => i.status === "unpaid").length;
+    const overdueInvoices = invoices.filter(i =>
+      i.status !== "paid" && i.status !== "cancelled" &&
+      i.dueDate != null && i.dueDate < today
+    );
+    for (const i of invoices) {
+      const v = parseFloat(i.total || "0");
+      if (!isNaN(v)) totalValue += v;
+    }
+    for (const i of overdueInvoices) {
+      const v = parseFloat(i.total || "0");
+      if (!isNaN(v)) overdueValue += v;
+    }
+    const invoiceStats = {
+      total: invoices.length,
+      totalValue: totalValue.toFixed(2),
+      paid: paidCount,
+      unpaid: unpaidCount,
+      overdue: overdueInvoices.length,
+      overdueValue: overdueValue.toFixed(2),
+    };
+
+    // Project stats
+    const projectStats = {
+      total: projects.length,
+      active: projects.filter(p => p.status === "in_progress").length,
+      completed: projects.filter(p => p.status === "finished").length,
+    };
+
+    // Task stats
+    const overdueTasks = tasks.filter(t =>
+      t.status !== "complete" && t.dueDate != null && t.dueDate < today
+    );
+    const taskStats = {
+      total: tasks.length,
+      open: tasks.filter(t => t.status !== "complete").length,
+      completed: tasks.filter(t => t.status === "complete").length,
+      overdue: overdueTasks.length,
+    };
+
+    // Ticket stats
+    const ticketStats = {
+      total: tickets.length,
+      open: tickets.filter(t => t.status === "open" || t.status === "in_progress").length,
+      closed: tickets.filter(t => t.status === "closed").length,
+    };
+
+    return {
+      customers: customerStats,
+      leads: leadStats,
+      invoices: invoiceStats,
+      projects: projectStats,
+      tasks: taskStats,
+      tickets: ticketStats,
+    };
   }
 }
 

@@ -28,6 +28,7 @@ import AdminAgentToolsPage from "@/pages/admin/admin-agent-tools";
 import AdminICODemoPage from "@/pages/admin/admin-ico-demo";
 import AdminDeployPage from "@/pages/admin/admin-deploy";
 import AdminAgentsPage from "@/pages/admin/admin-agents";
+import AdminCRMPage from "@/pages/admin/admin-crm";
 import SchedulePage from "@/pages/schedule";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -50,6 +51,7 @@ function AppRouter() {
       <Route path="/admin/ico" component={AdminICODemoPage} />
       <Route path="/admin/deploy" component={AdminDeployPage} />
       <Route path="/admin/agents" component={AdminAgentsPage} />
+      <Route path="/admin/crm" component={AdminCRMPage} />
       <Route path="/schedule" component={SchedulePage} />
       <Route component={NotFound} />
     </Switch>

@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -33,6 +33,7 @@ const adminItemKeys = [
   { titleKey: "admin.calendar", url: "/admin/calendar", icon: CalendarDays },
   { titleKey: "admin.aiRules", url: "/admin/rules", icon: Brain },
   { titleKey: "admin.agentTools", url: "/admin/agent-tools", icon: BrainCircuit },
+  { titleKey: "admin.crm", url: "/admin/crm", icon: Database },
   { titleKey: "admin.userTimeline", url: "/admin/timeline", icon: Activity },
   { titleKey: "admin.icoDashboard", url: "/admin/ico", icon: Coins },
   { titleKey: "admin.deployment", url: "/admin/deploy", icon: Rocket },

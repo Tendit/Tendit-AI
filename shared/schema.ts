@@ -258,6 +258,7 @@ JSON formats:
 - Reminder: {"action": "set_reminder", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..."}
 - Alarm: {"action": "set_alarm", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM"}
 - Task: {"action": "create_task", "title": "...", "dueDate": "YYYY-MM-DD", "dueTime": "HH:MM", "priority": "high|medium|low", "notes": "..."}
+- CRM Query: {"action": "crm_query", "entity": "customers|leads|invoices|projects|tasks|tickets|dashboard", "filters": {"status": "...", "search": "...", "overdue": true}}
 
 Rules:
 - Always infer the date if the user says "today", "tomorrow", "next Monday", etc.
@@ -828,3 +829,142 @@ export type InsertRelayMessage = z.infer<typeof insertRelayMessageSchema>;
 // Admin credentials
 export const ADMIN_EMAIL = "admin@aiproxy.io";
 export const ADMIN_PASSWORD = "admin2026!";
+
+// ===== CRM Integration =====
+export const crmConnections = sqliteTable("crm_connections", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(), // e.g. "PerfexCRM"
+  type: text("type").notNull().default("perfex"), // perfex, hubspot, etc.
+  apiUrl: text("api_url").notNull(), // e.g. "https://massive-group.io/crm"
+  apiKey: text("api_key").notNull(), // API key for authenticating with CRM
+  webhookSecret: text("webhook_secret").notNull(), // secret for incoming webhooks
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  lastSyncAt: text("last_sync_at"),
+  syncConfig: text("sync_config"), // JSON: which entities to sync
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export const crmCustomers = sqliteTable("crm_customers", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  connectionId: integer("connection_id").notNull(),
+  externalId: text("external_id").notNull(), // ID in PerfexCRM
+  company: text("company"),
+  email: text("email"),
+  phone: text("phone"),
+  address: text("address"),
+  city: text("city"),
+  country: text("country"),
+  status: text("status"), // active, inactive
+  totalInvoiced: text("total_invoiced"),
+  metadata: text("metadata"), // JSON extra fields
+  syncedAt: text("synced_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export const crmLeads = sqliteTable("crm_leads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  connectionId: integer("connection_id").notNull(),
+  externalId: text("external_id").notNull(),
+  name: text("name"),
+  email: text("email"),
+  phone: text("phone"),
+  company: text("company"),
+  status: text("status"),
+  source: text("source"),
+  assignedTo: text("assigned_to"),
+  value: text("value"),
+  lastContact: text("last_contact"),
+  metadata: text("metadata"),
+  syncedAt: text("synced_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export const crmInvoices = sqliteTable("crm_invoices", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  connectionId: integer("connection_id").notNull(),
+  externalId: text("external_id").notNull(),
+  customerId: text("customer_id"),
+  customerName: text("customer_name"),
+  number: text("number"),
+  date: text("date"),
+  dueDate: text("due_date"),
+  total: text("total"),
+  amountPaid: text("amount_paid"),
+  status: text("status"), // paid, unpaid, overdue, partially_paid, cancelled
+  currency: text("currency"),
+  items: text("items"), // JSON
+  metadata: text("metadata"),
+  syncedAt: text("synced_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export const crmProjects = sqliteTable("crm_projects", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  connectionId: integer("connection_id").notNull(),
+  externalId: text("external_id").notNull(),
+  name: text("name"),
+  customerName: text("customer_name"),
+  status: text("status"), // not_started, in_progress, on_hold, cancelled, finished
+  startDate: text("start_date"),
+  deadline: text("deadline"),
+  progress: integer("progress"),
+  billingType: text("billing_type"),
+  totalCost: text("total_cost"),
+  metadata: text("metadata"),
+  syncedAt: text("synced_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export const crmTasks = sqliteTable("crm_tasks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  connectionId: integer("connection_id").notNull(),
+  externalId: text("external_id").notNull(),
+  name: text("name"),
+  projectName: text("project_name"),
+  assignedTo: text("assigned_to"),
+  status: text("status"), // not_started, in_progress, testing, awaiting_feedback, complete
+  priority: text("priority"),
+  startDate: text("start_date"),
+  dueDate: text("due_date"),
+  metadata: text("metadata"),
+  syncedAt: text("synced_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+export const crmTickets = sqliteTable("crm_tickets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  connectionId: integer("connection_id").notNull(),
+  externalId: text("external_id").notNull(),
+  subject: text("subject"),
+  customerName: text("customer_name"),
+  department: text("department"),
+  status: text("status"), // open, in_progress, answered, on_hold, closed
+  priority: text("priority"),
+  lastReply: text("last_reply"),
+  metadata: text("metadata"),
+  syncedAt: text("synced_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
+
+// CRM insert schemas and types
+export const insertCrmConnectionSchema = createInsertSchema(crmConnections).omit({ id: true, createdAt: true });
+export type InsertCrmConnection = z.infer<typeof insertCrmConnectionSchema>;
+export type CrmConnection = typeof crmConnections.$inferSelect;
+
+export const insertCrmCustomerSchema = createInsertSchema(crmCustomers).omit({ id: true });
+export type InsertCrmCustomer = z.infer<typeof insertCrmCustomerSchema>;
+export type CrmCustomer = typeof crmCustomers.$inferSelect;
+
+export const insertCrmLeadSchema = createInsertSchema(crmLeads).omit({ id: true });
+export type InsertCrmLead = z.infer<typeof insertCrmLeadSchema>;
+export type CrmLead = typeof crmLeads.$inferSelect;
+
+export const insertCrmInvoiceSchema = createInsertSchema(crmInvoices).omit({ id: true });
+export type InsertCrmInvoice = z.infer<typeof insertCrmInvoiceSchema>;
+export type CrmInvoice = typeof crmInvoices.$inferSelect;
+
+export const insertCrmProjectSchema = createInsertSchema(crmProjects).omit({ id: true });
+export type InsertCrmProject = z.infer<typeof insertCrmProjectSchema>;
+export type CrmProject = typeof crmProjects.$inferSelect;
+
+export const insertCrmTaskSchema = createInsertSchema(crmTasks).omit({ id: true });
+export type InsertCrmTask = z.infer<typeof insertCrmTaskSchema>;
+export type CrmTask = typeof crmTasks.$inferSelect;
+
+export const insertCrmTicketSchema = createInsertSchema(crmTickets).omit({ id: true });
+export type InsertCrmTicket = z.infer<typeof insertCrmTicketSchema>;
+export type CrmTicket = typeof crmTickets.$inferSelect;

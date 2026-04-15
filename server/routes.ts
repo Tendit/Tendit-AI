@@ -1595,7 +1595,7 @@ export async function registerRoutes(
         name,
         description: description || "",
         avatar: avatar || "🤖",
-        capabilities: JSON.stringify(capabilities || ["create_event", "set_reminder", "set_alarm", "create_task"]),
+        capabilities: JSON.stringify(capabilities || ["create_event", "set_reminder", "set_alarm", "create_task", "crm_query"]),
         systemPrompt: systemPrompt || "",
         ownerEmail: ownerEmail || "",
         ownerPhone: ownerPhone || "",
@@ -1751,7 +1751,65 @@ export async function registerRoutes(
 
       // Process extracted actions
       const actions: any[] = [];
+      let crmQueryContext = "";
       for (const block of jsonBlocks) {
+        // Handle crm_query capability directly — no schedule item, just data retrieval
+        if (block.action === "crm_query") {
+          try {
+            const connections = storage.getCrmConnections();
+            const conn = connections.find(c => c.isActive) || connections[0];
+            if (!conn) {
+              actions.push({ ...block, status: "no_crm_connection", result: "No CRM connection configured." });
+              crmQueryContext += "\n[CRM] No active CRM connection found.\n";
+            } else {
+              const entity = (block.entity || "").toLowerCase();
+              const filters = block.filters || {};
+              let crmData: any[] | object = [];
+              let label = "";
+              switch (entity) {
+                case "customers":
+                  crmData = storage.getCrmCustomers(conn.id, filters);
+                  label = "Customers";
+                  break;
+                case "leads":
+                  crmData = storage.getCrmLeads(conn.id, filters);
+                  label = "Leads";
+                  break;
+                case "invoices":
+                  crmData = storage.getCrmInvoices(conn.id, filters);
+                  label = "Invoices";
+                  break;
+                case "projects":
+                  crmData = storage.getCrmProjects(conn.id, filters);
+                  label = "Projects";
+                  break;
+                case "tasks":
+                  crmData = storage.getCrmTasks(conn.id, filters);
+                  label = "Tasks";
+                  break;
+                case "tickets":
+                  crmData = storage.getCrmTickets(conn.id, filters);
+                  label = "Tickets";
+                  break;
+                case "dashboard":
+                default:
+                  crmData = storage.getCrmDashboardStats(conn.id);
+                  label = "Dashboard";
+                  break;
+              }
+              actions.push({ ...block, status: "crm_data_fetched", entity, result: crmData });
+              const preview = Array.isArray(crmData)
+                ? `${(crmData as any[]).length} ${label} records retrieved.`
+                : JSON.stringify(crmData, null, 2);
+              crmQueryContext += `\n[CRM ${label}]\n${preview}\n`;
+            }
+          } catch (crmErr: any) {
+            actions.push({ ...block, status: "crm_error", error: crmErr.message });
+            crmQueryContext += `\n[CRM Error] ${crmErr.message}\n`;
+          }
+          continue;
+        }
+
         if (agent.approvalMode === "auto") {
           // Auto-approve: create schedule item immediately
           const request = await storage.createAgentRequest({
@@ -2247,6 +2305,166 @@ export async function registerRoutes(
     } catch (e: any) {
       return res.status(500).json({ message: e.message });
     }
+  });
+
+  // ===== CRM Integration Routes =====
+
+  // Webhook endpoint (called by PerfexCRM module)
+  app.post("/api/crm/webhook", async (req, res) => {
+    const secret = req.headers["x-webhook-secret"] as string;
+    const { event, data, connectionId } = req.body;
+    if (!secret) return res.status(401).json({ error: "Missing webhook secret" });
+
+    // Find connection by webhook secret
+    const connections = storage.getCrmConnections();
+    const conn = connections.find(c => c.webhookSecret === secret);
+    if (!conn) return res.status(401).json({ error: "Invalid webhook secret" });
+
+    const [entity] = event.split(".");
+    try {
+      switch (entity) {
+        case "customer": storage.upsertCrmCustomers(conn.id, [data]); break;
+        case "lead": storage.upsertCrmLeads(conn.id, [data]); break;
+        case "invoice": storage.upsertCrmInvoices(conn.id, [data]); break;
+        case "project": storage.upsertCrmProjects(conn.id, [data]); break;
+        case "task": storage.upsertCrmTasks(conn.id, [data]); break;
+        case "ticket": storage.upsertCrmTickets(conn.id, [data]); break;
+      }
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Batch sync endpoint (called by PerfexCRM full sync)
+  app.post("/api/crm/sync/:type", async (req, res) => {
+    const secret = req.headers["x-webhook-secret"] as string;
+    if (!secret) return res.status(401).json({ error: "Missing secret" });
+    const connections = storage.getCrmConnections();
+    const conn = connections.find(c => c.webhookSecret === secret);
+    if (!conn) return res.status(401).json({ error: "Invalid secret" });
+
+    const { type } = req.params;
+    const { data } = req.body; // array of entities
+    if (!Array.isArray(data)) return res.status(400).json({ error: "data must be an array" });
+
+    let count = 0;
+    switch (type) {
+      case "customers": count = storage.upsertCrmCustomers(conn.id, data); break;
+      case "leads": count = storage.upsertCrmLeads(conn.id, data); break;
+      case "invoices": count = storage.upsertCrmInvoices(conn.id, data); break;
+      case "projects": count = storage.upsertCrmProjects(conn.id, data); break;
+      case "tasks": count = storage.upsertCrmTasks(conn.id, data); break;
+      case "tickets": count = storage.upsertCrmTickets(conn.id, data); break;
+      default: return res.status(400).json({ error: "Unknown entity type" });
+    }
+    storage.updateCrmConnection(conn.id, { lastSyncAt: new Date().toISOString() });
+    return res.json({ ok: true, synced: count });
+  });
+
+  // Connection status endpoint
+  app.get("/api/crm/status", async (req, res) => {
+    const secret = (req.headers["x-webhook-secret"] as string) || (req.headers["x-crm-api-key"] as string);
+    if (!secret) return res.status(401).json({ error: "Missing secret" });
+    const connections = storage.getCrmConnections();
+    const conn = connections.find(c => c.webhookSecret === secret || c.apiKey === secret);
+    if (!conn) return res.status(401).json({ error: "Invalid secret" });
+    return res.json({ ok: true, connected: true, name: conn.name, lastSync: conn.lastSyncAt });
+  });
+
+  // Admin CRM management routes
+  app.get("/api/admin/crm/connections", adminMiddleware, async (_req, res) => {
+    return res.json(storage.getCrmConnections());
+  });
+
+  app.post("/api/admin/crm/connections", adminMiddleware, async (req, res) => {
+    const { name, type, apiUrl, apiKey } = req.body;
+    if (!name || !apiUrl || !apiKey) return res.status(400).json({ error: "name, apiUrl, apiKey required" });
+    const crypto = await import("crypto");
+    const webhookSecret = crypto.randomBytes(32).toString("hex");
+    const conn = storage.createCrmConnection({ name, type: type || "perfex", apiUrl, apiKey, webhookSecret, isActive: true });
+    return res.json(conn);
+  });
+
+  app.patch("/api/admin/crm/connections/:id", adminMiddleware, async (req, res) => {
+    const conn = storage.updateCrmConnection(parseInt(req.params.id), req.body);
+    if (!conn) return res.status(404).json({ error: "Connection not found" });
+    return res.json(conn);
+  });
+
+  app.delete("/api/admin/crm/connections/:id", adminMiddleware, async (req, res) => {
+    storage.deleteCrmConnection(parseInt(req.params.id));
+    return res.json({ ok: true });
+  });
+
+  // Frontend-compatible CRM aliases
+  app.get("/api/admin/crm/connection", adminMiddleware, async (_req, res) => {
+    const connections = storage.getCrmConnections();
+    return res.json(connections.length > 0 ? connections[0] : null);
+  });
+
+  app.post("/api/admin/crm/connect", adminMiddleware, async (req, res) => {
+    const { name, crmUrl, apiKey } = req.body;
+    if (!crmUrl || !apiKey) return res.status(400).json({ error: "crmUrl and apiKey required" });
+    const crypto = await import("crypto");
+    const webhookSecret = crypto.randomBytes(32).toString("hex");
+    const conn = storage.createCrmConnection({
+      name: name || "PerfexCRM",
+      type: "perfex",
+      apiUrl: crmUrl,
+      apiKey,
+      webhookSecret,
+      isActive: true,
+    });
+    return res.json(conn);
+  });
+
+  app.delete("/api/admin/crm/:connectionId/disconnect", adminMiddleware, async (req, res) => {
+    storage.deleteCrmConnection(parseInt(req.params.connectionId));
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/admin/crm/:connectionId/sync", adminMiddleware, async (req, res) => {
+    // Trigger sync — for now just update lastSyncAt; actual pull from CRM happens via webhooks
+    const conn = storage.updateCrmConnection(parseInt(req.params.connectionId), { lastSyncAt: new Date().toISOString() });
+    if (!conn) return res.status(404).json({ error: "Connection not found" });
+    return res.json({ ok: true, lastSync: conn.lastSyncAt });
+  });
+
+  // CRM data query routes
+  app.get("/api/admin/crm/:connectionId/dashboard", adminMiddleware, async (req, res) => {
+    const stats = storage.getCrmDashboardStats(parseInt(req.params.connectionId));
+    return res.json(stats);
+  });
+
+  app.get("/api/admin/crm/:connectionId/customers", adminMiddleware, async (req, res) => {
+    const { search, status } = req.query;
+    return res.json(storage.getCrmCustomers(parseInt(req.params.connectionId), { search: search as string, status: status as string }));
+  });
+
+  app.get("/api/admin/crm/:connectionId/leads", adminMiddleware, async (req, res) => {
+    const { search, status } = req.query;
+    return res.json(storage.getCrmLeads(parseInt(req.params.connectionId), { search: search as string, status: status as string }));
+  });
+
+  app.get("/api/admin/crm/:connectionId/invoices", adminMiddleware, async (req, res) => {
+    const { status, overdue } = req.query;
+    return res.json(storage.getCrmInvoices(parseInt(req.params.connectionId), { status: status as string, overdue: overdue === "true" }));
+  });
+
+  app.get("/api/admin/crm/:connectionId/projects", adminMiddleware, async (req, res) => {
+    const { status } = req.query;
+    return res.json(storage.getCrmProjects(parseInt(req.params.connectionId), { status: status as string }));
+  });
+
+  app.get("/api/admin/crm/:connectionId/tasks", adminMiddleware, async (req, res) => {
+    const { status, assignedTo } = req.query;
+    return res.json(storage.getCrmTasks(parseInt(req.params.connectionId), { status: status as string, assignedTo: assignedTo as string }));
+  });
+
+  app.get("/api/admin/crm/:connectionId/tickets", adminMiddleware, async (req, res) => {
+    const { status, priority } = req.query;
+    return res.json(storage.getCrmTickets(parseInt(req.params.connectionId), { status: status as string, priority: priority as string }));
   });
 
   return httpServer;
