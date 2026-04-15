@@ -1398,8 +1398,9 @@ export class DatabaseStorage implements IStorage {
     // Project stats
     const projectStats = {
       total: projects.length,
-      active: projects.filter(p => p.status === "in_progress").length,
-      completed: projects.filter(p => p.status === "finished").length,
+      active: projects.filter(p => ["2", "in_progress", "active"].includes(p.status || "")).length,
+      onHold: projects.filter(p => ["3", "on_hold"].includes(p.status || "")).length,
+      completed: projects.filter(p => ["4", "5", "finished", "completed"].includes(p.status || "")).length,
     };
 
     // Task stats

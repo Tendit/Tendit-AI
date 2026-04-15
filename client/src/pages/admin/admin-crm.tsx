@@ -502,7 +502,7 @@ export default function AdminCrmPage() {
                 <Skeleton className="h-7 w-16" />
               ) : (
                 <>
-                  <div className="text-2xl font-bold">{dashboard?.projects?.active ?? 0}</div>
+                  <div className="text-2xl font-bold">{dashboard?.projects?.total ?? 0}</div>
                   <div className="text-xs text-muted-foreground">
                     {dashboard?.projects?.onHold ?? 0} {en ? "on hold" : "בהמתנה"}
                   </div>
