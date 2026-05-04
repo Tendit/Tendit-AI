@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 const navItemKeys = [
   { titleKey: "nav.dashboard", url: "/", icon: LayoutDashboard },
   { titleKey: "nav.chat", url: "/chat", icon: MessageSquare },
+  { titleKey: "nav.projects", url: "/projects", icon: FolderKanban },
   { titleKey: "nav.apiKeys", url: "/keys", icon: Key },
   { titleKey: "nav.billing", url: "/billing", icon: CreditCard },
   { titleKey: "nav.schedule", url: "/schedule", icon: Clock },

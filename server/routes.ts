@@ -1810,6 +1810,130 @@ export async function registerRoutes(
           continue;
         }
 
+        // Handle project_query — retrieve project data scoped to user's projects
+        if (block.action === "project_query") {
+          try {
+            const scope = (block.scope || "projects").toLowerCase();
+            const filters = block.filters || {};
+            let projectData: any[] | object = [];
+            let label = "";
+
+            switch (scope) {
+              case "projects": {
+                projectData = storage.listProjects({ memberId: userId, ...filters });
+                label = "Projects";
+                break;
+              }
+              case "members": {
+                const projId = filters.projectId;
+                if (projId && storage.isUserInProject(projId, userId)) {
+                  projectData = storage.listProjectMembers(projId);
+                } else {
+                  projectData = [];
+                }
+                label = "Members";
+                break;
+              }
+              case "assignments": {
+                // Only return assignments for projects the user is in
+                const userProjects = storage.listProjects({ memberId: userId });
+                const userProjectIds = userProjects.map(p => p.id);
+                const rawAssignments = storage.listAssignments(filters);
+                projectData = rawAssignments.filter((a: any) => userProjectIds.includes(a.projectId));
+                label = "Assignments";
+                break;
+              }
+              case "messages": {
+                const projId = filters.projectId;
+                if (projId && storage.isUserInProject(projId, userId)) {
+                  projectData = storage.listProjectMessages(projId, filters.limit || 20);
+                } else {
+                  projectData = [];
+                }
+                label = "Messages";
+                break;
+              }
+              default: {
+                // Return summary of user's projects
+                const userProjects = storage.listProjects({ memberId: userId });
+                projectData = {
+                  projectCount: userProjects.length,
+                  projects: userProjects.slice(0, 5).map(p => ({ id: p.id, name: p.name, status: p.status })),
+                };
+                label = "Summary";
+              }
+            }
+
+            actions.push({ ...block, status: "project_data_fetched", scope, result: projectData });
+            const preview = Array.isArray(projectData)
+              ? `${(projectData as any[]).length} ${label} records retrieved.`
+              : JSON.stringify(projectData, null, 2);
+            crmQueryContext += `\n[Project ${label}]\n${preview}\n`;
+          } catch (projErr: any) {
+            actions.push({ ...block, status: "project_error", error: projErr.message });
+            crmQueryContext += `\n[Project Error] ${projErr.message}\n`;
+          }
+          continue;
+        }
+
+        // Handle create_assignment — create a project assignment (manager/owner only)
+        if (block.action === "create_assignment") {
+          try {
+            const projectId = block.projectId;
+            if (!projectId) throw new Error("projectId is required for create_assignment");
+            if (!storage.isUserInProject(projectId, userId)) throw new Error("You are not a member of this project");
+            const members = storage.listProjectMembers(projectId);
+            const userMember = members.find(m => m.userId === userId);
+            if (!userMember || (userMember.role !== "owner" && userMember.role !== "manager")) {
+              throw new Error("Only project owners and managers can create assignments");
+            }
+            const assignment = storage.createAssignment({
+              projectId,
+              assignedTo: block.assignedTo || userId,
+              createdBy: userId,
+              title: block.title || "Untitled Task",
+              description: block.description,
+              type: block.type || "one_time",
+              dueAt: block.dueAt,
+              cronExpression: block.cronExpression,
+              cronTimezone: block.cronTimezone || "Asia/Jerusalem",
+              status: "pending",
+              priority: block.priority || "medium",
+              reminderMinutes: block.reminderMinutes || 30,
+            });
+            actions.push({ ...block, status: "assignment_created", result: assignment });
+            crmQueryContext += `\n[Project] Assignment created: "${assignment.title}" (id: ${assignment.id})\n`;
+          } catch (assignErr: any) {
+            actions.push({ ...block, status: "assignment_error", error: assignErr.message });
+            crmQueryContext += `\n[Project Error] ${assignErr.message}\n`;
+          }
+          continue;
+        }
+
+        // Handle project_message — post a message to a project chat
+        if (block.action === "project_message") {
+          try {
+            const projectId = block.projectId;
+            if (!projectId) throw new Error("projectId is required for project_message");
+            if (!storage.isUserInProject(projectId, userId)) throw new Error("You are not a member of this project");
+            const msgContent = block.content || block.message || "";
+            if (!msgContent) throw new Error("content is required for project_message");
+            const msg = storage.createProjectMessage({
+              projectId,
+              userId,
+              role: "user",
+              content: msgContent,
+              source: "ai",
+            });
+            actions.push({ ...block, status: "message_posted", result: { id: msg.id } });
+            crmQueryContext += `\n[Project] Message posted to project ${projectId}: "${msgContent.slice(0, 80)}..."\n`;
+          } catch (msgErr: any) {
+            actions.push({ ...block, status: "project_message_error", error: msgErr.message });
+            crmQueryContext += `\n[Project Error] ${msgErr.message}\n`;
+          }
+          continue;
+        }
+
         if (agent.approvalMode === "auto") {
           // Auto-approve: create schedule item immediately
           const request = await storage.createAgentRequest({
@@ -2465,6 +2589,532 @@ export async function registerRoutes(
   app.get("/api/admin/crm/:connectionId/tickets", adminMiddleware, async (req, res) => {
     const { status, priority } = req.query;
     return res.json(storage.getCrmTickets(parseInt(req.params.connectionId), { status: status as string, priority: priority as string }));
+  });
+
+  // ===== PROJECT MANAGEMENT ROUTES =====
+
+  // Helper: get project member role for a user (returns null if not a member)
+  async function getProjectRole(projectId: number, userId: number): Promise<string | null> {
+    const members = storage.listProjectMembers(projectId);
+    const m = members.find(m => m.userId === userId);
+    return m ? m.role : null;
+  }
+
+  // Helper: check if user can manage a project (owner/manager/admin)
+  async function canManageProject(projectId: number, userId: number): Promise<boolean> {
+    const user = await storage.getUser(userId);
+    if (user?.role === "admin") return true;
+    const project = storage.getProject(projectId);
+    if (!project) return false;
+    if (project.ownerId === userId) return true;
+    const role = await getProjectRole(projectId, userId);
+    return role === "owner" || role === "manager";
+  }
+
+  // --- Projects ---
+
+  // GET /api/projects — list projects the user is a member of (or all if admin)
+  app.get("/api/projects", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUser(userId);
+      const { status, search } = req.query;
+      let projects;
+      if (user?.role === "admin") {
+        projects = storage.listProjects({
+          status: status as string | undefined,
+          search: search as string | undefined,
+        });
+      } else {
+        projects = storage.listProjects({
+          memberId: userId,
+          status: status as string | undefined,
+          search: search as string | undefined,
+        });
+      }
+      return res.json(projects);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/projects/:id — get project with members + counts
+  app.get("/api/projects/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const project = storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const members = storage.listProjectMembers(projectId);
+      const assignments = storage.listAssignments({ projectId });
+      return res.json({
+        ...project,
+        members,
+        assignmentCount: assignments.length,
+        pendingCount: assignments.filter(a => a.status === "pending" || a.status === "in_progress").length,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects — create project
+  app.post("/api/projects", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const project = storage.createProject({ ...req.body, ownerId: userId });
+      // Auto-add owner as member with role "owner"
+      storage.addProjectMember({ projectId: project.id, userId, role: "owner" });
+      return res.status(201).json(project);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // PATCH /api/projects/:id — update project
+  app.patch("/api/projects/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can update this project" });
+      }
+      const project = storage.updateProject(projectId, req.body);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      return res.json(project);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // DELETE /api/projects/:id — delete project (owner/admin only)
+  app.delete("/api/projects/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const project = storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const user = await storage.getUser(userId);
+      const role = await getProjectRole(projectId, userId);
+      if (user?.role !== "admin" && project.ownerId !== userId && role !== "owner") {
+        return res.status(403).json({ message: "Only owner/admin can delete this project" });
+      }
+      const result = storage.deleteProject(projectId);
+      return res.json({ message: "Deleted", changes: result.changes });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // --- Project Members ---
+
+  // GET /api/projects/:id/members
+  app.get("/api/projects/:id/members", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      return res.json(storage.listProjectMembers(projectId));
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects/:id/members — add member by userId or email
+  app.post("/api/projects/:id/members", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can add members" });
+      }
+      const { userId: targetUserId, email, role = "contributor" } = req.body;
+      if (email) {
+        // Check if user already exists
+        const existingUser = await storage.getUserByEmail(email);
+        if (existingUser) {
+          // Add directly
+          if (storage.isUserInProject(projectId, existingUser.id)) {
+            return res.status(400).json({ message: "User is already a member" });
+          }
+          const member = storage.addProjectMember({ projectId, userId: existingUser.id, role });
+          return res.status(201).json({ member, type: "direct" });
+        } else {
+          // Create invite
+          const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+          const invite = storage.createInvite({
+            email,
+            invitedBy: userId,
+            projectId,
+            role,
+            status: "pending",
+            expiresAt,
+          });
+          return res.status(201).json({ invite, type: "invite" });
+        }
+      } else if (targetUserId) {
+        if (storage.isUserInProject(projectId, targetUserId)) {
+          return res.status(400).json({ message: "User is already a member" });
+        }
+        const member = storage.addProjectMember({ projectId, userId: targetUserId, role });
+        return res.status(201).json({ member, type: "direct" });
+      } else {
+        return res.status(400).json({ message: "Provide userId or email" });
+      }
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // PATCH /api/projects/:id/members/:userId — change role
+  app.patch("/api/projects/:id/members/:memberId", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const targetUserId = parseInt(req.params.memberId);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can change roles" });
+      }
+      const { role } = req.body;
+      const member = storage.updateProjectMember(projectId, targetUserId, role);
+      if (!member) return res.status(404).json({ message: "Member not found" });
+      return res.json(member);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // DELETE /api/projects/:id/members/:userId
+  app.delete("/api/projects/:id/members/:memberId", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const targetUserId = parseInt(req.params.memberId);
+      // Allow self-removal OR owner/manager/admin
+      if (targetUserId !== userId && !await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can remove members" });
+      }
+      const result = storage.removeProjectMember(projectId, targetUserId);
+      return res.json({ message: "Removed", changes: result.changes });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // --- Invites ---
+
+  // GET /api/invites/:token — get invite info (public)
+  app.get("/api/invites/:token", async (req, res) => {
+    try {
+      const invite = storage.getInviteByToken(req.params.token);
+      if (!invite) return res.status(404).json({ message: "Invite not found" });
+      // Return invite without sensitive fields
+      return res.json({
+        email: invite.email,
+        status: invite.status,
+        expiresAt: invite.expiresAt,
+        projectId: invite.projectId,
+        role: invite.role,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/invites/accept — accept invite (creates user if needed, logs in)
+  app.post("/api/invites/accept", async (req, res) => {
+    try {
+      const { token, username, password } = req.body;
+      if (!token) return res.status(400).json({ message: "Token is required" });
+
+      const invite = storage.getInviteByToken(token);
+      if (!invite) return res.status(404).json({ message: "Invite not found" });
+      if (invite.status !== "pending") return res.status(400).json({ message: `Invite is already ${invite.status}` });
+      if (new Date(invite.expiresAt) < new Date()) {
+        storage.expireInvite(invite.id);
+        return res.status(400).json({ message: "Invite has expired" });
+      }
+
+      let user = await storage.getUserByEmail(invite.email);
+      if (!user) {
+        // Create new user
+        if (!username || !password) {
+          return res.status(400).json({ message: "username and password required to create account" });
+        }
+        if (await storage.getUserByUsername(username)) {
+          return res.status(400).json({ message: "Username already exists" });
+        }
+        const hashedPassword = await bcrypt.hash(password, 10);
+        user = await storage.createUser({ username, email: invite.email, password: hashedPassword });
+        await storage.updateUserCredits(user.id, PLANS.free.credits);
+      }
+
+      // Accept invite (also adds to project_members)
+      storage.acceptInvite(token, user.id);
+
+      // Log the user in
+      const sessionToken = generateToken();
+      createSession(sessionToken, user.id);
+
+      return res.json({
+        token: sessionToken,
+        user: { id: user.id, username: user.username, email: user.email, credits: user.credits, plan: user.plan, role: user.role },
+        projectId: invite.projectId,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // --- Assignments ---
+
+  // GET /api/projects/:id/assignments
+  app.get("/api/projects/:id/assignments", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const { assignedTo, status, overdue, dueBefore } = req.query;
+      const assignments = storage.listAssignments({
+        projectId,
+        assignedTo: assignedTo ? parseInt(assignedTo as string) : undefined,
+        status: status as string | undefined,
+        overdue: overdue === "true",
+        dueBefore: dueBefore as string | undefined,
+      });
+      return res.json(assignments);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects/:id/assignments
+  app.post("/api/projects/:id/assignments", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can create assignments" });
+      }
+      const assignment = storage.createAssignment({ ...req.body, projectId, createdBy: userId });
+      return res.status(201).json(assignment);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // PATCH /api/assignments/:id
+  app.patch("/api/assignments/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id);
+      const assignment = storage.getAssignment(id);
+      if (!assignment) return res.status(404).json({ message: "Assignment not found" });
+      if (!await canManageProject(assignment.projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can update assignments" });
+      }
+      const updated = storage.updateAssignment(id, req.body);
+      return res.json(updated);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/assignments/:id/complete — mark done
+  app.post("/api/assignments/:id/complete", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id);
+      const assignment = storage.getAssignment(id);
+      if (!assignment) return res.status(404).json({ message: "Assignment not found" });
+      if (!storage.isUserInProject(assignment.projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const updated = storage.markAssignmentDone(id, userId);
+      return res.json(updated);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // DELETE /api/assignments/:id
+  app.delete("/api/assignments/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id);
+      const assignment = storage.getAssignment(id);
+      if (!assignment) return res.status(404).json({ message: "Assignment not found" });
+      if (!await canManageProject(assignment.projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can delete assignments" });
+      }
+      const result = storage.deleteAssignment(id);
+      return res.json({ message: "Deleted", changes: result.changes });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // --- Project Messages ---
+
+  // GET /api/projects/:id/messages
+  app.get("/api/projects/:id/messages", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
+      const messages = storage.listProjectMessages(projectId, limit);
+      return res.json(messages);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects/:id/messages — post message + optional AI reply if @johnny mentioned
+  app.post("/api/projects/:id/messages", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+
+      const { content, mentionsUserIds, attachments } = req.body;
+      if (!content) return res.status(400).json({ message: "content is required" });
+
+      const msg = storage.createProjectMessage({
+        projectId,
+        userId,
+        role: "user",
+        content,
+        mentionsUserIds: mentionsUserIds ? JSON.stringify(mentionsUserIds) : null,
+        attachments: attachments ? JSON.stringify(attachments) : null,
+        source: "web",
+      });
+
+      // Create notifications for mentioned users
+      if (Array.isArray(mentionsUserIds) && mentionsUserIds.length > 0) {
+        const project = storage.getProject(projectId);
+        for (const mentionedId of mentionsUserIds) {
+          if (mentionedId !== userId) {
+            storage.createNotification({
+              userId: mentionedId,
+              type: "mention",
+              title: `You were mentioned in ${project?.name || "a project"}`,
+              body: content.slice(0, 200),
+              link: `#/projects/${projectId}/messages`,
+              projectId,
+              read: false,
+            });
+          }
+        }
+      }
+
+      // Check for @johnny mention — trigger AI reply
+      const johnnySays = /@johnny/i.test(content);
+      if (johnnySays) {
+        // Fire AI reply asynchronously so we can return the user message immediately
+        (async () => {
+          try {
+            const project = storage.getProject(projectId);
+            const members = storage.listProjectMembers(projectId);
+            const recentMessages = storage.listProjectMessages(projectId, 20);
+            const activeAssignments = storage.listAssignments({ projectId, status: "pending" });
+
+            const memberNames = members.map(m => `${m.user?.username || `user#${m.userId}`} (${m.role})`).join(", ");
+            const assignmentSummary = activeAssignments.slice(0, 10)
+              .map(a => `- ${a.title} (assigned to user#${a.assignedTo}, due: ${a.dueAt || a.nextRunAt || "not set"})`) 
+              .join("\n");
+            const recentChat = recentMessages.slice(-10)
+              .map(m => `[${m.role}${m.userId ? `#${m.userId}` : ""}]: ${m.content}`)
+              .join("\n");
+
+            const systemPrompt = `You are Johnny, an AI project assistant helping with project "${project?.name || "Unknown Project"}".\n\nProject members: ${memberNames}\n\nActive assignments:\n${assignmentSummary || "None"}\n\nRecent chat:\n${recentChat}\n\nRespond helpfully and concisely. Focus on the project context.`;
+
+            const aiResult = await callProvider("perplexity", "sonar", [
+              { role: "system", content: systemPrompt },
+              { role: "user", content },
+            ]);
+
+            if (aiResult.content) {
+              storage.createProjectMessage({
+                projectId,
+                userId: null,
+                role: "assistant",
+                content: aiResult.content,
+                source: "ai",
+              });
+            }
+          } catch (aiErr) {
+            console.error("[Project AI] Error generating Johnny reply:", aiErr);
+          }
+        })();
+      }
+
+      return res.status(201).json(msg);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // --- Notifications ---
+
+  // GET /api/notifications
+  app.get("/api/notifications", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const unreadOnly = req.query.unreadOnly === "true";
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : undefined;
+      return res.json(storage.listNotifications(userId, { unreadOnly, limit }));
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/notifications/unread-count
+  app.get("/api/notifications/unread-count", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      return res.json({ count: storage.countUnreadNotifications(userId) });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/notifications/:id/read
+  app.post("/api/notifications/:id/read", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      storage.markNotificationRead(parseInt(req.params.id), userId);
+      return res.json({ message: "Marked as read" });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/notifications/mark-all-read
+  app.post("/api/notifications/mark-all-read", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      storage.markAllNotificationsRead(userId);
+      return res.json({ message: "All notifications marked as read" });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
   });
 
   return httpServer;

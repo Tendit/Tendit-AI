@@ -259,6 +259,9 @@ JSON formats:
 - Alarm: {"action": "set_alarm", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM"}
 - Task: {"action": "create_task", "title": "...", "dueDate": "YYYY-MM-DD", "dueTime": "HH:MM", "priority": "high|medium|low", "notes": "..."}
 - CRM Query: {"action": "crm_query", "entity": "customers|leads|invoices|projects|tasks|tickets|dashboard", "filters": {"status": "...", "search": "...", "overdue": true}}
+- Project Query: {"action": "project_query", "scope": "projects|members|assignments|messages|overview", "projectId": null|number, "filters": {"status": "...", "assignedTo": null|number, "overdue": true, "search": "..."}}
+- Create Assignment: {"action": "create_assignment", "projectId": number, "title": "...", "assignedTo": number, "type": "one_time|recurring", "dueAt": "YYYY-MM-DDTHH:MM", "cronExpression": "...", "priority": "high|medium|low", "description": "..."}
+- Project Message: {"action": "project_message", "projectId": number, "content": "...", "mentionsUserIds": [number]}
 
 Rules:
 - Always infer the date if the user says "today", "tomorrow", "next Monday", etc.
@@ -968,3 +971,118 @@ export type CrmTask = typeof crmTasks.$inferSelect;
 export const insertCrmTicketSchema = createInsertSchema(crmTickets).omit({ id: true });
 export type InsertCrmTicket = z.infer<typeof insertCrmTicketSchema>;
 export type CrmTicket = typeof crmTickets.$inferSelect;
+
+// =====================================================
+// PROJECT MANAGEMENT MODULE
+// =====================================================
+
+// Projects — core entity for team collaboration
+export const projects = sqliteTable("projects", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  description: text("description"),
+  clientId: integer("client_id"), // optional link to crm_customers.id
+  ownerId: integer("owner_id").notNull(), // tendit user id
+  status: text("status").notNull().default("planning"), // planning, active, on_hold, completed, cancelled
+  priority: text("priority").notNull().default("medium"), // low, medium, high, urgent
+  startDate: text("start_date"), // YYYY-MM-DD
+  deadline: text("deadline"), // YYYY-MM-DD
+  budget: real("budget"),
+  agentId: integer("agent_id"), // platform_agents.id (defaults to Johnny)
+  telegramTopic: text("telegram_topic"), // optional forum topic id for Telegram sync
+  color: text("color").default("#0d9488"), // visual accent
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+export type Project = typeof projects.$inferSelect;
+export const insertProjectSchema = createInsertSchema(projects).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProject = z.infer<typeof insertProjectSchema>;
+
+// Project members
+export const projectMembers = sqliteTable("project_members", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  userId: integer("user_id").notNull(),
+  role: text("role").notNull().default("contributor"), // owner, manager, contributor, viewer
+  addedAt: text("added_at").notNull().default(new Date().toISOString()),
+});
+export type ProjectMember = typeof projectMembers.$inferSelect;
+export const insertProjectMemberSchema = createInsertSchema(projectMembers).omit({ id: true, addedAt: true });
+export type InsertProjectMember = z.infer<typeof insertProjectMemberSchema>;
+
+// User invites (for inviting members by email before they have an account)
+export const userInvites = sqliteTable("user_invites", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  email: text("email").notNull(),
+  token: text("token").notNull().unique(),
+  invitedBy: integer("invited_by").notNull(), // user id
+  projectId: integer("project_id"), // if null, just a platform invite
+  role: text("role").default("contributor"),
+  status: text("status").notNull().default("pending"), // pending, accepted, expired
+  expiresAt: text("expires_at").notNull(),
+  acceptedAt: text("accepted_at"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type UserInvite = typeof userInvites.$inferSelect;
+export const insertUserInviteSchema = createInsertSchema(userInvites).omit({ id: true, createdAt: true });
+export type InsertUserInvite = z.infer<typeof insertUserInviteSchema>;
+
+// Project assignments — tasks with calendar/cron support
+export const projectAssignments = sqliteTable("project_assignments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  assignedTo: integer("assigned_to").notNull(), // user id
+  createdBy: integer("created_by").notNull(), // user id
+  title: text("title").notNull(),
+  description: text("description"),
+  type: text("type").notNull().default("one_time"), // one_time, recurring
+  dueAt: text("due_at"), // ISO timestamp for one-time
+  cronExpression: text("cron_expression"), // for recurring
+  cronTimezone: text("cron_timezone").default("Asia/Jerusalem"),
+  nextRunAt: text("next_run_at"), // computed next firing time
+  lastRunAt: text("last_run_at"),
+  status: text("status").notNull().default("pending"), // pending, in_progress, done, overdue, cancelled
+  priority: text("priority").notNull().default("medium"),
+  reminderMinutes: integer("reminder_minutes").default(30),
+  reminderSentAt: text("reminder_sent_at"),
+  completedAt: text("completed_at"),
+  scheduleItemId: integer("schedule_item_id"), // links to platform calendar
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ProjectAssignment = typeof projectAssignments.$inferSelect;
+export const insertProjectAssignmentSchema = createInsertSchema(projectAssignments).omit({ id: true, createdAt: true, nextRunAt: true, lastRunAt: true, reminderSentAt: true, completedAt: true });
+export type InsertProjectAssignment = z.infer<typeof insertProjectAssignmentSchema>;
+
+// Project chat messages
+export const projectMessages = sqliteTable("project_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  userId: integer("user_id"), // null if from system/AI
+  role: text("role").notNull().default("user"), // user, assistant, system
+  content: text("content").notNull(),
+  mentionsUserIds: text("mentions_user_ids"), // JSON array of user ids
+  attachments: text("attachments"), // JSON array of {name, url}
+  source: text("source").notNull().default("web"), // web, telegram, ai
+  telegramMessageId: text("telegram_message_id"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ProjectMessage = typeof projectMessages.$inferSelect;
+export const insertProjectMessageSchema = createInsertSchema(projectMessages).omit({ id: true, createdAt: true });
+export type InsertProjectMessage = z.infer<typeof insertProjectMessageSchema>;
+
+// Notifications (in-app bell, free)
+export const notifications = sqliteTable("notifications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  type: text("type").notNull(), // assignment_due, assignment_overdue, project_invite, mention, project_message
+  title: text("title").notNull(),
+  body: text("body"),
+  link: text("link"), // hash route inside app
+  projectId: integer("project_id"),
+  assignmentId: integer("assignment_id"),
+  read: integer("read", { mode: "boolean" }).notNull().default(false),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type Notification = typeof notifications.$inferSelect;
+export const insertNotificationSchema = createInsertSchema(notifications).omit({ id: true, createdAt: true });
+export type InsertNotification = z.infer<typeof insertNotificationSchema>;

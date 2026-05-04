@@ -1,4 +1,4 @@
-import { Switch, Route, Router } from "wouter";
+import { Switch, Route, Router, useLocation } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -30,6 +30,10 @@ import AdminDeployPage from "@/pages/admin/admin-deploy";
 import AdminAgentsPage from "@/pages/admin/admin-agents";
 import AdminCRMPage from "@/pages/admin/admin-crm";
 import SchedulePage from "@/pages/schedule";
+import ProjectsListPage from "@/pages/projects-list";
+import ProjectDetailPage from "@/pages/project-detail";
+import InviteAcceptPage from "@/pages/invite-accept";
+import { NotificationBell } from "@/components/notification-bell";
 import { Skeleton } from "@/components/ui/skeleton";
 
 function AppRouter() {
@@ -53,6 +57,8 @@ function AppRouter() {
       <Route path="/admin/agents" component={AdminAgentsPage} />
       <Route path="/admin/crm" component={AdminCRMPage} />
       <Route path="/schedule" component={SchedulePage} />
+      <Route path="/projects" component={ProjectsListPage} />
+      <Route path="/projects/:id" component={ProjectDetailPage} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -73,6 +79,7 @@ function AuthenticatedApp() {
           <header className={`flex items-center justify-between px-3 py-2 border-b ${dir === "rtl" ? "flex-row-reverse" : ""}`}>
             <SidebarTrigger data-testid="button-sidebar-toggle" />
             <div className="flex items-center gap-1">
+              <NotificationBell />
               <LocaleToggle />
               <ThemeToggle />
             </div>
@@ -88,6 +95,12 @@ function AuthenticatedApp() {
 
 function AppShell() {
   const { user, isLoading } = useAuth();
+  const [location] = useLocation();
+
+  // Allow public invite-accept route without authentication
+  if (location.startsWith("/invite/")) {
+    return <InviteAcceptPage />;
+  }
 
   if (isLoading) {
     return (

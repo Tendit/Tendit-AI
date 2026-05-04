@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { startProjectScheduler } from "./project-scheduler";
 
 const app = express();
 const httpServer = createServer(app);
@@ -98,6 +99,8 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      // Start background schedulers after server is up
+      startProjectScheduler();
     },
   );
 })();

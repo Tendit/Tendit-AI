@@ -26,12 +26,21 @@ import {
   type CrmProject, crmProjects,
   type CrmTask, crmTasks,
   type CrmTicket, crmTickets,
+  // Project Management
+  type Project, type InsertProject, projects,
+  type ProjectMember, type InsertProjectMember, projectMembers,
+  type UserInvite, type InsertUserInvite, userInvites,
+  type ProjectAssignment, type InsertProjectAssignment, projectAssignments,
+  type ProjectMessage, type InsertProjectMessage, projectMessages,
+  type Notification, type InsertNotification, notifications,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
   DEFAULT_AGENT_TOOLS, DEFAULT_AGENT_TOOL_RULES,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc, and, sql, like, gte } from "drizzle-orm";
+import { eq, desc, and, sql, like, gte, lte, or, isNull } from "drizzle-orm";
+import { randomBytes } from "crypto";
+import { CronExpressionParser } from "cron-parser";
 
 const sqlite = new Database("data.db");
 sqlite.pragma("journal_mode = WAL");
@@ -174,6 +183,49 @@ export interface IStorage {
   getCrmTasks(connectionId: number, filters?: { status?: string; assignedTo?: string }): any[];
   getCrmTickets(connectionId: number, filters?: { status?: string; priority?: string }): any[];
   getCrmDashboardStats(connectionId: number): any;
+
+  // ===== PROJECT MANAGEMENT =====
+
+  // Projects
+  listProjects(filters?: { ownerId?: number; memberId?: number; status?: string; search?: string }): Project[];
+  getProject(id: number): Project | undefined;
+  createProject(data: InsertProject): Project;
+  updateProject(id: number, data: Partial<InsertProject>): Project | undefined;
+  deleteProject(id: number): { changes: number };
+
+  // Project Members
+  listProjectMembers(projectId: number): (ProjectMember & { user?: { id: number; username: string; email: string } })[]
+  addProjectMember(data: InsertProjectMember): ProjectMember;
+  removeProjectMember(projectId: number, userId: number): { changes: number };
+  updateProjectMember(projectId: number, userId: number, role: string): ProjectMember | undefined;
+  isUserInProject(projectId: number, userId: number): boolean;
+
+  // Invites
+  createInvite(data: Omit<InsertUserInvite, "token">): UserInvite;
+  getInviteByToken(token: string): UserInvite | undefined;
+  listInvitesForProject(projectId: number): UserInvite[];
+  acceptInvite(token: string, userId: number): UserInvite | undefined;
+  expireInvite(id: number): void;
+
+  // Assignments
+  listAssignments(filters: { projectId?: number; assignedTo?: number; status?: string; overdue?: boolean; dueBefore?: string }): ProjectAssignment[];
+  getAssignment(id: number): ProjectAssignment | undefined;
+  createAssignment(data: InsertProjectAssignment): ProjectAssignment;
+  updateAssignment(id: number, data: Partial<InsertProjectAssignment>): ProjectAssignment | undefined;
+  markAssignmentDone(id: number, userId: number): ProjectAssignment | undefined;
+  deleteAssignment(id: number): { changes: number };
+  listDueAssignments(now: Date): ProjectAssignment[];
+
+  // Project Messages
+  listProjectMessages(projectId: number, limit?: number): ProjectMessage[];
+  createProjectMessage(data: InsertProjectMessage): ProjectMessage;
+
+  // Notifications
+  listNotifications(userId: number, opts?: { unreadOnly?: boolean; limit?: number }): Notification[];
+  countUnreadNotifications(userId: number): number;
+  createNotification(data: InsertNotification): Notification;
+  markNotificationRead(id: number, userId: number): void;
+  markAllNotificationsRead(userId: number): void;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1429,6 +1481,273 @@ export class DatabaseStorage implements IStorage {
       tasks: taskStats,
       tickets: ticketStats,
     };
+  }
+
+  // ===== PROJECT MANAGEMENT =====
+
+  // --- Projects ---
+
+  listProjects(filters?: { ownerId?: number; memberId?: number; status?: string; search?: string }): Project[] {
+    if (filters?.memberId !== undefined) {
+      // Join via project_members to find projects the user is a member of
+      const memberRows = db.select().from(projectMembers)
+        .where(eq(projectMembers.userId, filters.memberId)).all();
+      const projectIds = memberRows.map(m => m.projectId);
+      if (projectIds.length === 0) return [];
+      let results = db.select().from(projects).all();
+      results = results.filter(p => projectIds.includes(p.id));
+      if (filters.status) results = results.filter(p => p.status === filters.status);
+      if (filters.search) {
+        const s = filters.search.toLowerCase();
+        results = results.filter(p => p.name.toLowerCase().includes(s) || (p.description || "").toLowerCase().includes(s));
+      }
+      return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    }
+    let results = db.select().from(projects).all();
+    if (filters?.ownerId !== undefined) results = results.filter(p => p.ownerId === filters.ownerId);
+    if (filters?.status) results = results.filter(p => p.status === filters.status);
+    if (filters?.search) {
+      const s = filters.search.toLowerCase();
+      results = results.filter(p => p.name.toLowerCase().includes(s) || (p.description || "").toLowerCase().includes(s));
+    }
+    return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getProject(id: number): Project | undefined {
+    return db.select().from(projects).where(eq(projects.id, id)).get();
+  }
+
+  createProject(data: InsertProject): Project {
+    const now = new Date().toISOString();
+    return db.insert(projects).values({ ...data, createdAt: now, updatedAt: now }).returning().get();
+  }
+
+  updateProject(id: number, data: Partial<InsertProject>): Project | undefined {
+    return db.update(projects).set({ ...data, updatedAt: new Date().toISOString() }).where(eq(projects.id, id)).returning().get();
+  }
+
+  deleteProject(id: number): { changes: number } {
+    // Cascade delete members, assignments, messages
+    db.delete(projectMembers).where(eq(projectMembers.projectId, id)).run();
+    db.delete(projectAssignments).where(eq(projectAssignments.projectId, id)).run();
+    db.delete(projectMessages).where(eq(projectMessages.projectId, id)).run();
+    const result = db.delete(projects).where(eq(projects.id, id)).run();
+    return { changes: result.changes };
+  }
+
+  // --- Project Members ---
+
+  listProjectMembers(projectId: number): (ProjectMember & { user?: { id: number; username: string; email: string } })[] {
+    const members = db.select().from(projectMembers).where(eq(projectMembers.projectId, projectId)).all();
+    return members.map(m => {
+      const user = db.select({ id: users.id, username: users.username, email: users.email })
+        .from(users).where(eq(users.id, m.userId)).get();
+      return { ...m, user: user || undefined };
+    });
+  }
+
+  addProjectMember(data: InsertProjectMember): ProjectMember {
+    return db.insert(projectMembers).values({ ...data, addedAt: new Date().toISOString() }).returning().get();
+  }
+
+  removeProjectMember(projectId: number, userId: number): { changes: number } {
+    const result = db.delete(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId))).run();
+    return { changes: result.changes };
+  }
+
+  updateProjectMember(projectId: number, userId: number, role: string): ProjectMember | undefined {
+    return db.update(projectMembers).set({ role })
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)))
+      .returning().get();
+  }
+
+  isUserInProject(projectId: number, userId: number): boolean {
+    const row = db.select().from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId))).get();
+    return !!row;
+  }
+
+  // --- Invites ---
+
+  createInvite(data: Omit<InsertUserInvite, "token">): UserInvite {
+    const token = randomBytes(24).toString("hex");
+    const now = new Date().toISOString();
+    return db.insert(userInvites).values({ ...data, token, createdAt: now }).returning().get();
+  }
+
+  getInviteByToken(token: string): UserInvite | undefined {
+    return db.select().from(userInvites).where(eq(userInvites.token, token)).get();
+  }
+
+  listInvitesForProject(projectId: number): UserInvite[] {
+    return db.select().from(userInvites).where(eq(userInvites.projectId, projectId)).orderBy(desc(userInvites.createdAt)).all();
+  }
+
+  acceptInvite(token: string, userId: number): UserInvite | undefined {
+    const invite = db.select().from(userInvites).where(eq(userInvites.token, token)).get();
+    if (!invite || invite.status !== "pending") return undefined;
+    const now = new Date().toISOString();
+    const updated = db.update(userInvites)
+      .set({ status: "accepted", acceptedAt: now })
+      .where(eq(userInvites.token, token))
+      .returning().get();
+    // Add user to project members if projectId is set
+    if (updated && invite.projectId) {
+      const existing = db.select().from(projectMembers)
+        .where(and(eq(projectMembers.projectId, invite.projectId), eq(projectMembers.userId, userId))).get();
+      if (!existing) {
+        db.insert(projectMembers).values({
+          projectId: invite.projectId,
+          userId,
+          role: invite.role || "contributor",
+          addedAt: now,
+        }).run();
+      }
+    }
+    return updated;
+  }
+
+  expireInvite(id: number): void {
+    db.update(userInvites).set({ status: "expired" }).where(eq(userInvites.id, id)).run();
+  }
+
+  // --- Assignments ---
+
+  listAssignments(filters: { projectId?: number; assignedTo?: number; status?: string; overdue?: boolean; dueBefore?: string }): ProjectAssignment[] {
+    let results = db.select().from(projectAssignments).all();
+    if (filters.projectId !== undefined) results = results.filter(a => a.projectId === filters.projectId);
+    if (filters.assignedTo !== undefined) results = results.filter(a => a.assignedTo === filters.assignedTo);
+    if (filters.status) results = results.filter(a => a.status === filters.status);
+    if (filters.overdue) {
+      const now = new Date().toISOString();
+      results = results.filter(a => {
+        const due = a.dueAt || a.nextRunAt;
+        return due != null && due < now && a.status !== "done" && a.status !== "cancelled";
+      });
+    }
+    if (filters.dueBefore) {
+      results = results.filter(a => {
+        const due = a.dueAt || a.nextRunAt;
+        return due != null && due <= filters.dueBefore!;
+      });
+    }
+    return results.sort((a, b) => (a.dueAt || a.nextRunAt || "").localeCompare(b.dueAt || b.nextRunAt || ""));
+  }
+
+  getAssignment(id: number): ProjectAssignment | undefined {
+    return db.select().from(projectAssignments).where(eq(projectAssignments.id, id)).get();
+  }
+
+  createAssignment(data: InsertProjectAssignment): ProjectAssignment {
+    const now = new Date().toISOString();
+    let nextRunAt: string | null = null;
+    if (data.type === "recurring" && data.cronExpression) {
+      try {
+        const tz = data.cronTimezone || "Asia/Jerusalem";
+        const interval = CronExpressionParser.parse(data.cronExpression, { tz });
+        nextRunAt = interval.next().toISOString();
+      } catch {
+        // ignore invalid cron
+      }
+    }
+    return db.insert(projectAssignments).values({
+      ...data,
+      nextRunAt,
+      createdAt: now,
+    }).returning().get();
+  }
+
+  updateAssignment(id: number, data: Partial<InsertProjectAssignment>): ProjectAssignment | undefined {
+    return db.update(projectAssignments).set(data).where(eq(projectAssignments.id, id)).returning().get();
+  }
+
+  markAssignmentDone(id: number, _userId: number): ProjectAssignment | undefined {
+    const assignment = db.select().from(projectAssignments).where(eq(projectAssignments.id, id)).get();
+    if (!assignment) return undefined;
+    const now = new Date().toISOString();
+    if (assignment.type === "recurring" && assignment.cronExpression) {
+      // Recompute next run and reset to pending
+      let nextRunAt: string | null = null;
+      try {
+        const tz = assignment.cronTimezone || "Asia/Jerusalem";
+        const interval = CronExpressionParser.parse(assignment.cronExpression, { tz });
+        nextRunAt = interval.next().toISOString();
+      } catch {
+        // ignore
+      }
+      return db.update(projectAssignments)
+        .set({ status: "pending", completedAt: now, lastRunAt: now, nextRunAt, reminderSentAt: null })
+        .where(eq(projectAssignments.id, id)).returning().get();
+    }
+    return db.update(projectAssignments)
+      .set({ status: "done", completedAt: now })
+      .where(eq(projectAssignments.id, id)).returning().get();
+  }
+
+  deleteAssignment(id: number): { changes: number } {
+    const result = db.delete(projectAssignments).where(eq(projectAssignments.id, id)).run();
+    return { changes: result.changes };
+  }
+
+  listDueAssignments(now: Date): ProjectAssignment[] {
+    const nowIso = now.toISOString();
+    // Fetch pending assignments without a reminderSentAt, then filter in JS
+    const pending = db.select().from(projectAssignments)
+      .where(and(
+        eq(projectAssignments.status, "pending"),
+        isNull(projectAssignments.reminderSentAt)
+      )).all();
+    return pending.filter(a => {
+      const due = a.nextRunAt || a.dueAt;
+      return due != null && due <= nowIso;
+    });
+  }
+
+  // --- Project Messages ---
+
+  listProjectMessages(projectId: number, limit = 100): ProjectMessage[] {
+    return db.select().from(projectMessages)
+      .where(eq(projectMessages.projectId, projectId))
+      .orderBy(projectMessages.createdAt)
+      .limit(limit)
+      .all();
+  }
+
+  createProjectMessage(data: InsertProjectMessage): ProjectMessage {
+    return db.insert(projectMessages).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  // --- Notifications ---
+
+  listNotifications(userId: number, opts?: { unreadOnly?: boolean; limit?: number }): Notification[] {
+    let q = db.select().from(notifications).where(eq(notifications.userId, userId));
+    const results = q.orderBy(desc(notifications.createdAt)).all();
+    let filtered = results;
+    if (opts?.unreadOnly) filtered = filtered.filter(n => !n.read);
+    if (opts?.limit) filtered = filtered.slice(0, opts.limit);
+    return filtered;
+  }
+
+  countUnreadNotifications(userId: number): number {
+    const result = db.select({ count: sql<number>`COUNT(*)` })
+      .from(notifications)
+      .where(and(eq(notifications.userId, userId), eq(notifications.read, false)))
+      .get();
+    return result?.count || 0;
+  }
+
+  createNotification(data: InsertNotification): Notification {
+    return db.insert(notifications).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+
+  markNotificationRead(id: number, userId: number): void {
+    db.update(notifications).set({ read: true })
+      .where(and(eq(notifications.id, id), eq(notifications.userId, userId))).run();
+  }
+
+  markAllNotificationsRead(userId: number): void {
+    db.update(notifications).set({ read: true }).where(eq(notifications.userId, userId)).run();
   }
 }
 

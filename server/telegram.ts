@@ -115,6 +115,22 @@ export async function handleTelegramUpdate(bot: TelegramBot, agent: PlatformAgen
     metadata: JSON.stringify({ message_id: message.message_id, username }),
   });
 
+  // ── PROJECT ROUTING (handled before standard AI chat) ─────────────────
+  // Handle "✅" or "done" reply — mark most recent due assignment as done
+  if (/^[✅]$/.test(text) || text.toLowerCase() === "done") {
+    const handled = await handleProjectDoneReply(bot, chatId, link);
+    if (handled) return;
+    // If no pending assignment found, fall through to normal handling
+  }
+
+  // Handle @<project-slug> <content> or /project <slug> <content>
+  const projectMatch = parseProjectMessage(text);
+  if (projectMatch) {
+    await handleProjectMessage(bot, chatId, link, username || firstName, projectMatch.slug, projectMatch.content);
+    return;
+  }
+  // ──────────────────────────────────────────────────────────────────────
+
   // Check if this is the owner (admin)
   const isOwner = link.role === "owner" || bot.ownerTelegramChatId === chatId;
 
@@ -480,6 +496,314 @@ export async function notifyOwnerFromWeb(agentId: number, userName: string, mess
     originalMessage: message,
     messageType: actions?.length ? "action" : "text",
   });
+}
+
+/**
+ * Send a project assignment reminder to a user via Telegram.
+ * Finds the user's linked Telegram chat ID (from any active bot) and sends a reminder message.
+ */
+export async function sendProjectAssignmentReminder(
+  assignment: {
+    id: number;
+    title: string;
+    dueAt?: string | null;
+    nextRunAt?: string | null;
+    projectId: number;
+  },
+  user: { id: number; username: string }
+): Promise<void> {
+  try {
+    // Find all active bots and look for a Telegram link for this user
+    const bots = await storage.getActiveTelegramBots();
+    for (const bot of bots) {
+      const link = await storage.getTelegramLinkByUserId(bot.id, user.id);
+      if (link?.telegramChatId) {
+        const dueTime = assignment.dueAt || assignment.nextRunAt;
+        let whenStr = "soon";
+        if (dueTime) {
+          const d = new Date(dueTime);
+          whenStr = d.toLocaleString("en-IL", {
+            timeZone: "Asia/Jerusalem",
+            dateStyle: "medium",
+            timeStyle: "short",
+          });
+        }
+        const text = `📌 <b>Project #${assignment.projectId}</b> — Reminder: <b>${assignment.title}</b> due <i>${whenStr}</i>`;
+        await sendTelegramMessage(bot.botToken, link.telegramChatId, text);
+        return; // Send only once (first bot with a link for this user)
+      }
+    }
+  } catch (e: any) {
+    console.error("[Telegram] sendProjectAssignmentReminder error:", e.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECT MESSAGE ROUTING
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Convert a project name to a slug (lowercase, spaces → hyphens).
+ */
+function nameToSlug(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, "-");
+}
+
+/**
+ * Parse @<slug> <content> or /project <slug> <content> from a message.
+ * Returns null if the message doesn't match either pattern.
+ */
+function parseProjectMessage(text: string): { slug: string; content: string } | null {
+  // @slug rest-of-message
+  const atMatch = text.match(/^@([\w-]+)\s+(.+)$/s);
+  if (atMatch) return { slug: atMatch[1].toLowerCase(), content: atMatch[2].trim() };
+
+  // /project slug rest-of-message
+  const cmdMatch = text.match(/^\/project\s+([\w-]+)\s+(.+)$/is);
+  if (cmdMatch) return { slug: cmdMatch[1].toLowerCase(), content: cmdMatch[2].trim() };
+
+  return null;
+}
+
+/**
+ * Resolve a project by slug (name lowercased, spaces → hyphens).
+ * Returns the project if exactly one match, or null.
+ */
+function resolveProjectBySlug(slug: string) {
+  try {
+    const allProjects = storage.listProjects();
+    const matches = allProjects.filter((p) => nameToSlug(p.name) === slug);
+    if (matches.length === 1) return matches[0];
+    // Fallback: partial match
+    const partial = allProjects.filter((p) => nameToSlug(p.name).startsWith(slug));
+    if (partial.length === 1) return partial[0];
+  } catch (e: any) {
+    console.error("[telegram] resolveProjectBySlug error:", e.message);
+  }
+  return null;
+}
+
+/**
+ * Handle @project-slug message or /project slug message.
+ * Verifies membership, creates projectMessage, optionally triggers AI.
+ */
+async function handleProjectMessage(
+  bot: TelegramBot,
+  chatId: string,
+  link: TelegramLink,
+  senderDisplayName: string,
+  slug: string,
+  content: string
+): Promise<void> {
+  try {
+    const project = resolveProjectBySlug(slug);
+    if (!project) {
+      await sendTelegramMessage(bot.botToken, chatId, `❌ Project "${slug}" not found.`);
+      return;
+    }
+
+    // Verify the sender is a member
+    const senderId = link.userId;
+    if (!senderId || !storage.isUserInProject(project.id, senderId)) {
+      await sendTelegramMessage(
+        bot.botToken,
+        chatId,
+        `⛔ You are not a member of <b>${project.name}</b>.`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Create project message
+    const projectMsg = storage.createProjectMessage({
+      projectId: project.id,
+      userId: senderId,
+      role: "user",
+      content,
+      mentionsUserIds: "[]",
+      source: "telegram",
+    });
+
+    // Confirm to sender
+    await sendTelegramMessage(
+      bot.botToken,
+      chatId,
+      `✅ Posted to [<b>${project.name}</b>]`,
+      { parse_mode: "HTML" }
+    );
+
+    // Notify other members
+    const snippet = content.length > 80 ? content.substring(0, 80) + "…" : content;
+    const notifyText = `💬 [${project.name}] <b>${senderDisplayName}</b>: ${snippet}\n<a href="https://www.tendit.io/#/projects/${project.id}">View project</a>`;
+    await notifyProjectMembers(project.id, notifyText, senderId).catch((e: any) =>
+      console.error("[telegram] notifyProjectMembers error:", e.message)
+    );
+
+    // Trigger AI response if @johnny or @Johnny is mentioned
+    if (/\@johnny/i.test(content) && callProviderFn) {
+      try {
+        const history = storage.listProjectMessages(project.id, 20);
+        const messages: { role: string; content: string }[] = [
+          {
+            role: "system",
+            content: `You are Johnny, an AI project assistant. Project: ${project.name}. ${project.description || ""}`,
+          },
+          ...history
+            .slice()
+            .reverse()
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => ({ role: m.role, content: m.content })),
+          { role: "user", content },
+        ];
+        const result = await callProviderFn("perplexity", "sonar", messages);
+        const aiContent = result.content || "";
+        if (aiContent) {
+          storage.createProjectMessage({
+            projectId: project.id,
+            userId: null as any,
+            role: "assistant",
+            content: aiContent,
+            mentionsUserIds: "[]",
+            source: "ai",
+          });
+          // Send AI reply back to sender on Telegram
+          const cleanAi = aiContent.length > 3900 ? aiContent.substring(0, 3900) + "\n…" : aiContent;
+          await sendTelegramMessage(bot.botToken, chatId, cleanAi, { parse_mode: "HTML" });
+        }
+      } catch (e: any) {
+        console.error("[telegram] project AI response error:", e.message);
+      }
+    }
+  } catch (e: any) {
+    console.error("[telegram] handleProjectMessage error:", e.message);
+    await sendTelegramMessage(bot.botToken, chatId, "⚠️ Error posting to project. Please try again.");
+  }
+}
+
+/**
+ * Handle ✅ / "done" reply — marks the most recent pending/due assignment
+ * for this Telegram user as done.
+ * Returns true if an assignment was found and marked, false otherwise.
+ */
+async function handleProjectDoneReply(
+  bot: TelegramBot,
+  chatId: string,
+  link: TelegramLink
+): Promise<boolean> {
+  if (!link.userId) return false;
+  try {
+    // Find the most recently reminded pending assignment for this user
+    const assignments = storage.listAssignments({
+      assignedTo: link.userId,
+      status: "pending",
+    });
+
+    if (assignments.length === 0) return false;
+
+    // Sort by reminderSentAt descending, pick most recent
+    const sorted = assignments
+      .filter((a) => a.reminderSentAt)
+      .sort((a, b) => (b.reminderSentAt! > a.reminderSentAt! ? 1 : -1));
+
+    const target = sorted[0] || assignments[0];
+    const done = storage.markAssignmentDone(target.id, link.userId);
+    if (done) {
+      await sendTelegramMessage(
+        bot.botToken,
+        chatId,
+        `✅ Marked done — <b>${target.title}</b>`,
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+  } catch (e: any) {
+    console.error("[telegram] handleProjectDoneReply error:", e.message);
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECT NOTIFICATION HELPERS (exported for use by project-scheduler)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Get the first active bot token. Returns null if no bot configured. */
+async function getFirstBotToken(): Promise<string | null> {
+  try {
+    const bots = await storage.getActiveTelegramBots();
+    const active = bots.find((b) => b.isActive && b.botToken);
+    return active?.botToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send a Telegram reminder for a project assignment to a specific chat ID.
+ * No-ops if telegramChatId is null/undefined.
+ */
+export async function notifyProjectAssignment(
+  assignment: { id: number; title: string; type: string; dueAt?: string | null; nextRunAt?: string | null },
+  project: { id: number; name: string },
+  _user: { id: number; username: string },
+  telegramChatId: string | null | undefined
+): Promise<void> {
+  if (!telegramChatId) return;
+  const token = await getFirstBotToken();
+  if (!token) return;
+
+  const dueIso = assignment.type === "recurring" ? assignment.nextRunAt : assignment.dueAt;
+  let dueLine = "no due date";
+  if (dueIso) {
+    try {
+      const d = new Date(dueIso);
+      dueLine = d.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    } catch {
+      dueLine = dueIso;
+    }
+  }
+
+  const text =
+    `📌 [${project.name}]\n${assignment.title}\n\nDue: ${dueLine}\n\n` +
+    `Reply ✅ to mark done, or visit https://www.tendit.io/#/projects/${project.id}?tab=calendar`;
+
+  await sendTelegramMessage(token, telegramChatId, text, { parse_mode: "HTML" });
+}
+
+/**
+ * Notify all members of a project (optionally excluding one user) via Telegram.
+ */
+export async function notifyProjectMembers(
+  projectId: number,
+  message: string,
+  excludeUserId?: number
+): Promise<void> {
+  try {
+    const token = await getFirstBotToken();
+    if (!token) return;
+
+    const members = storage.listProjectMembers(projectId);
+    const bots = await storage.getActiveTelegramBots();
+
+    for (const member of members) {
+      if (excludeUserId !== undefined && member.userId === excludeUserId) continue;
+      // Find the chat ID for this user across all bots
+      let chatId: string | null = null;
+      for (const bot of bots) {
+        const lnk = await storage.getTelegramLinkByUserId(bot.id, member.userId);
+        if (lnk && lnk.isActive && lnk.telegramChatId) {
+          chatId = lnk.telegramChatId;
+          break;
+        }
+      }
+      if (chatId) {
+        await sendTelegramMessage(token, chatId, message, { parse_mode: "HTML" }).catch((e: any) =>
+          console.error(`[telegram] notifyProjectMembers send error (user ${member.userId}):`, e.message)
+        );
+      }
+    }
+  } catch (e: any) {
+    console.error("[telegram] notifyProjectMembers error:", e.message);
+  }
 }
 
 /**
