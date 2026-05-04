@@ -45,6 +45,100 @@ import { CronExpressionParser } from "cron-parser";
 const sqlite = new Database("data.db");
 sqlite.pragma("journal_mode = WAL");
 
+// Idempotent migration: ensure project management tables exist
+// (drizzle-kit push fails on existing indexes, so we run raw SQL on startup)
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    client_id INTEGER,
+    owner_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'planning',
+    priority TEXT NOT NULL DEFAULT 'medium',
+    start_date TEXT,
+    deadline TEXT,
+    budget REAL,
+    agent_id INTEGER,
+    telegram_topic TEXT,
+    color TEXT DEFAULT '#0d9488',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS project_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'contributor',
+    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS user_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    invited_by INTEGER NOT NULL,
+    project_id INTEGER,
+    role TEXT DEFAULT 'contributor',
+    status TEXT NOT NULL DEFAULT 'pending',
+    expires_at TEXT NOT NULL,
+    accepted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS project_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    assigned_to INTEGER NOT NULL,
+    created_by INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    type TEXT NOT NULL DEFAULT 'one_time',
+    due_at TEXT,
+    cron_expression TEXT,
+    cron_timezone TEXT DEFAULT 'Asia/Jerusalem',
+    next_run_at TEXT,
+    last_run_at TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    priority TEXT NOT NULL DEFAULT 'medium',
+    reminder_minutes INTEGER DEFAULT 30,
+    reminder_sent_at TEXT,
+    completed_at TEXT,
+    schedule_item_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS project_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    user_id INTEGER,
+    role TEXT NOT NULL DEFAULT 'user',
+    content TEXT NOT NULL,
+    mentions_user_ids TEXT,
+    attachments TEXT,
+    source TEXT NOT NULL DEFAULT 'web',
+    telegram_message_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT,
+    link TEXT,
+    project_id INTEGER,
+    assignment_id INTEGER,
+    read INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_members_project ON project_members(project_id);
+  CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id);
+  CREATE INDEX IF NOT EXISTS idx_assignments_project ON project_assignments(project_id);
+  CREATE INDEX IF NOT EXISTS idx_assignments_user ON project_assignments(assigned_to);
+  CREATE INDEX IF NOT EXISTS idx_assignments_status ON project_assignments(status);
+  CREATE INDEX IF NOT EXISTS idx_messages_project ON project_messages(project_id);
+  CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+`);
+console.log('[migrate] project tables ensured');
+
 export const db = drizzle(sqlite);
 
 export interface IStorage {
