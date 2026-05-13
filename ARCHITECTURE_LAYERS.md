@@ -265,17 +265,141 @@ layer he's currently in dictates which shelf he reaches for.
 - Self-hosted tools (LibreTranslate, Tesseract, Piston) = zero marginal cost forever.
 - B7 governance sets per-plan **tool budgets**: free=5 tools, starter=15, pro=30, enterprise=all.
 
-### The 6-step recipe for adding a new API
-1. **Pick the layer** — which shelf does this belong on? (Don't reflexively dump it in B4.)
-2. **R3 decide** — confirm free tier limits, auth method, rate caps.
-3. **B4 dispatcher** — if Johnny needs runtime access, add a tool function (e.g. `holiday_check({date, country})`).
-4. **B3 cron** *(optional)* — pre-fetch + cache if it's called often.
-5. **B7 governance** — register in plan matrix with per-call rate limit + cost cap.
-6. **R2 codify** — add a row to this table on the right shelf. Done.
+---
 
-Each addition = one shelf row, one optional dispatcher, one plan-matrix
-entry. Compounding leverage: more shelves stocked → more questions
-answerable → fewer LLM calls → lower cost → wider business reach.
+## Part VI — Price-Tiered Routing (Tools Per Tier, Per Layer)
+
+Each shelf isn't a flat list — it's a **three-tier ladder**: free → cheap →
+expensive. Johnny tries tier 1 first; if it fails (rate limit, downtime,
+price hike, geo-block, ToS change), he falls through to tier 2, then tier 3.
+If Base44 (or any vendor) changes their pricing tomorrow, you swap the
+tier-1 entry in one file and everything keeps working at the new cheapest
+price. **This is what makes the funnel anti-fragile.**
+
+This pattern is proven in production: [LiteLLM](https://docs.litellm.ai/docs/routing) uses `order=1/2/3`
+for LLM fallback, [OpenRouter](https://openrouter.ai/pricing) does it with `:floor` sorting. We apply the same
+idea to every layer's shelf, not just LLMs.
+
+### The tier ladder shape
+
+| Tier | Cost target | Use when | Example pick |
+|---|---|---|---|
+| **T1 Free** | $0 / call, no key OR free tier under cap | Always try first | Nager.Date holidays, Frankfurter FX, OSM Nominatim |
+| **T2 Cheap** | < $0.001 / call OR generous free tier | T1 rate-limited, downtime, or insufficient quality | Groq, Cerebras, OpenWeatherMap free, Cloudinary free |
+| **T3 Expensive** | Premium / authoritative | T1+T2 fail OR task needs top quality (paying customer, legal/medical) | Claude Opus, GPT-5, Mapbox paid, DeepL Pro |
+
+### Example tiers per shelf (illustrative — stored in DB, not hardcoded)
+
+| Layer | Capability | T1 Free | T2 Cheap | T3 Expensive |
+|---|---|---|---|---|
+| R1 | Web search | DuckDuckGo HTML | Brave Search free 2k/mo | Perplexity Sonar |
+| R1 | News | HN Algolia, Reddit JSON | NewsAPI free 100/day | NewsAPI paid |
+| R1 | Legal | EUR-Lex, Knesset open data | CourtListener free | Westlaw / Nevo |
+| R1 | Medical | PubMed, OpenFDA | RxNorm | UpToDate (paid) |
+| B1 | Geocoding | OSM Nominatim | Mapbox 100k/mo free | Google Maps Geocoding |
+| B1 | Holidays | Nager.Date + Hebcal | Calendarific free | Calendarific paid |
+| B3 | Weather | Open-Meteo (no key, free) | OpenWeatherMap free tier | Tomorrow.io |
+| B4 | LLM (low-stakes) | Groq Llama-3.3 free | Gemini Flash | Sonnet 4.6 |
+| B4 | LLM (reasoning) | DeepSeek free | GPT-5-mini | Claude Opus 4.7 |
+| B4 | OCR | Tesseract self-host | Mistral OCR free 1k/day | Google Document AI |
+| B4 | Image gen | Pollinations (no key) | HuggingFace SDXL | Imagen / DALL·E |
+| B4 | Voice STT | Whisper.cpp self-host | Groq Whisper free | ElevenLabs paid |
+| B5 | Email | None (skip per your rule) | Resend free 3k/mo | SendGrid paid |
+| B5 | SMS | Telegram (your standing rule) | Twilio free trial | Twilio paid |
+| B6 | Storage | Local disk + R2 free 10GB | Cloudinary free 25GB | S3 paid |
+| B7 | Monitoring | UptimeRobot free 50 monitors | BetterStack free | Datadog |
+
+### The Tool Router — one table that drives everything
+
+Store the ladder in a **`tool_providers`** table so you can swap tiers
+without a redeploy:
+
+```sql
+tool_providers (
+  capability      TEXT,      -- 'web_search', 'geocoding', 'llm_reasoning', ...
+  layer           TEXT,      -- 'R1', 'B1', 'B4', ...
+  tier            INTEGER,   -- 1, 2, 3
+  provider_name   TEXT,      -- 'groq', 'openrouter', 'sonar', ...
+  endpoint        TEXT,
+  auth_profile_id INTEGER,   -- FK to auth_profiles (↓ below)
+  cost_per_call   REAL,      -- in USD, for routing math
+  rate_limit_rpm  INTEGER,
+  monthly_cap     INTEGER,
+  enabled         INTEGER DEFAULT 1,
+  priority        INTEGER    -- within a tier, tie-break
+)
+```
+
+When Johnny needs `web_search`, the router runs:
+```
+SELECT * FROM tool_providers
+WHERE capability='web_search' AND enabled=1
+ORDER BY tier ASC, priority ASC
+```
+...and walks the list until one succeeds. **No code change needed when
+pricing shifts.**
+
+### The Profile Pool — multiple accounts per provider to multiply free tiers
+
+Each provider can have N free-tier accounts pooled behind one logical
+capability. The router picks the account with the most remaining quota.
+This is exactly what [GPT-Load](https://www.reddit.com/r/selfhosted/comments/1mwv6gg/) and similar self-hosted poolers do.
+
+```sql
+auth_profiles (
+  id              INTEGER PRIMARY KEY,
+  provider_name   TEXT,        -- 'groq', 'openweathermap', 'base44', ...
+  account_label   TEXT,        -- 'roy_personal', 'massive_corp', 'a3_academy'
+  api_key         TEXT,        -- encrypted
+  monthly_quota   INTEGER,
+  used_this_month INTEGER DEFAULT 0,
+  resets_at       TEXT,        -- when the free tier resets
+  enabled         INTEGER DEFAULT 1
+)
+```
+
+**Pooling examples for your stack:**
+- Groq free tier: 14,400 req/day per account. Pool 3 accounts (personal + Massive + A3) = 43,200 req/day, zero cost.
+- OpenWeatherMap: 1,000 calls/day per account. Pool 4 accounts = 4,000/day.
+- Base44: each plan has integration credits. Pool one per business entity if you must use Base44 for prototyping.
+- NewsAPI free: 100 req/day. Pool 5 accounts = 500/day.
+
+**Rules of the road** (so you stay within ToS):
+- One account per *real* legal entity (Roy personal, Massive Group LLC, A3 Academy, OrthoCare, LaunchKit). You actually have multiple businesses — use them legitimately.
+- Don't create burner accounts under fake names. That breaks ToS and risks bans on your real ones.
+- Self-host where you can (LibreTranslate, Tesseract, Whisper.cpp, Piston) — those have no quota at all.
+
+### Failover & cost-watch loop
+
+The router runs three guardrails on every call:
+
+1. **Pre-flight quota check.** If `used_this_month >= monthly_quota * 0.95`, skip this profile, try the next one in the same tier.
+2. **On-error tier escalation.** If the call returns 429/402/5xx, mark the profile cooled-down for N minutes and try the next provider in the same tier; if all tier-1 providers exhaust, escalate to tier 2.
+3. **Price-drift alarm (cron, B3).** Daily job pulls each provider's current pricing page. If T1 cost > T2 cost, send a notification: *"Provider X moved out of tier 1 — demote and pick replacement."* Johnny proposes a swap; you approve.
+
+### What changes when Base44 (or anyone) raises prices
+
+1. Cron detects the price drift, posts to Johnny.
+2. Johnny queries the catalog for alternative providers of the same capability.
+3. Returns a 2–3 option tradeoff table (R3 shelf).
+4. You pick — e.g. "move email from Resend to Brevo."
+5. One UPDATE on `tool_providers` swaps the tier. Zero code redeploy.
+
+This is the **anti-fragility property**. You're never locked into any
+single vendor at any single price point on any single layer.
+
+### The 6-step recipe for adding a new API (updated for tiers + pooling)
+1. **Pick the layer & capability** — which shelf, which capability slot?
+2. **Assign the tier** — free/cheap/expensive based on cost-per-call.
+3. **Register account profile(s)** — add one row per legitimate account in `auth_profiles`.
+4. **Add the route entry** — one row in `tool_providers` linking capability+tier+profile.
+5. **B3 cron pre-fetch** *(optional)* — cache hot queries.
+6. **B7 governance** — plan matrix decides which tiers each user plan can use.
+
+Each addition = one shelf row, one or more profile rows, one route entry.
+Compounding leverage: more shelves stocked + more profiles pooled → more
+questions answerable at lower cost → anti-fragile against any single
+vendor's pricing changes.
 
 ---
 
