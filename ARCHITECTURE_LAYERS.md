@@ -136,67 +136,146 @@ The common shape every time:
 
 ---
 
-## Part V — Tools as Capability Expansion
+## Part V — APIs per Layer (Tools as Capability Expansion)
 
-You nailed the underlying principle: **the architecture is a funnel for
-information sources**. Every free API, scraper, dataset, or service we plug
-into **B4 (Agent / Johnny)** widens what the system can answer and act on.
-More tools = more answerable questions = more credit-efficient routing
-(cheap data tool first, expensive LLM only when needed).
+You named the real shape: **every layer has its own API slot**, not just B4.
+The architecture is a funnel for information sources, and each layer pulls
+from a different shelf of free APIs. Johnny picks the right shelf at the
+right step instead of routing everything through one giant tool drawer.
 
-### The tool catalog — what to plug into Johnny
+### The shelves — one per layer
 
-| Domain | Free API / Source | Auth | What it unlocks for you |
+#### R0 — Intent & Constraints · *clarification APIs*
+| Slot | API / Source | Auth | Purpose |
 |---|---|---|---|
-| **General data** | [public-apis/public-apis](https://github.com/public-apis/public-apis) (1,400+ catalog) | varies | Master index — pick by use case |
-| **No-key APIs** | [Mixed Analytics list](https://mixedanalytics.com/blog/list-actually-free-open-no-auth-needed-apis/) · [apipheny](https://apipheny.io/free-api/) | none | Instant integration, zero friction |
-| **Web search** | Perplexity Sonar (you have a key) | key | Already wired — your primary research tool |
-| **Weather** | [OpenWeatherMap](https://openweathermap.org/api) | free tier | Current + 5-day forecast for any location — useful for OrthoCare follow-ups, A3 exam scheduling |
-| **Geocoding / maps** | OpenStreetMap Nominatim, Mapbox free tier | none / key | Address → coords, route lookup for assignments |
-| **News** | NewsAPI free tier, Hacker News API, Reddit API | key / none | Industry monitoring for LaunchKit competitor research |
-| **Finance** | Yahoo Finance (unofficial), CoinGecko, Frankfurter (FX) | none | Market context for LaunchKit validation, business decisions |
-| **Legal / regulatory** | CourtListener, EUR-Lex, Israeli Knesset open data | none / key | Your comparative-law research, A3 license compliance |
-| **Health / medical** | OpenFDA, PubMed E-utilities, ICD-10 API | none / key | OrthoCare evidence layer — meds, contraindications, studies |
-| **Astronomy** | NASA APOD + Open APIs, JPL Horizons | free key | Your space science interest, content for chat |
-| **Calendar / time** | TimeAPI.io, public holiday APIs (Nager.Date) | none | Cron scheduling that respects Israeli/global holidays |
-| **Translation** | LibreTranslate self-host, DeepL free tier | none / key | Hebrew ↔ English bridge for Johnny |
-| **OCR / docs** | Tesseract (self-host), Mistral OCR free tier | none / key | Upload-a-photo workflows on Telegram |
-| **Email lookup** | Hunter free tier, mail-tester | free tier | Invite-by-email validation in projects module |
-| **Domain / DNS** | Cloudflare API, WHOIS APIs | key | Auto-provision subdomains for tenant sites |
-| **Phone / SMS (free)** | Telegram Bot API ✓ already wired | bot token | Your primary channel — already done |
-| **Storage** | Cloudinary free tier, R2 free tier | key | Image/PDF hosting for A3 certificates, OrthoCare reports |
-| **Open LLM fallbacks** | Groq free tier, Cerebras free tier, Hugging Face Inference | key | Cheap routing target when Perplexity/Anthropic too expensive |
+| Memory recall | Internal `memory_search` | — | Pull past decisions, preferences, prior arcs |
+| Disambiguation | [Wikidata API](https://www.wikidata.org/wiki/Wikidata:Data_access) | none | Resolve entities, person/place/concept lookup |
+| Translation | LibreTranslate (self-host), DeepL free | none / key | Confirm intent across Hebrew ↔ English |
 
-### The funnel principle (how it maps to the layers)
+#### R1 — Cross-Domain Research · *evidence APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Web search | Perplexity Sonar ✓ wired | key | Live web with citations |
+| News | [NewsAPI](https://newsapi.org/) · HN Algolia · Reddit JSON | key / none | Industry + culture monitoring |
+| Academic | [OpenAlex](https://docs.openalex.org/) · [arXiv](https://info.arxiv.org/help/api/) · PubMed E-utilities | none | Papers, citations, scientific evidence |
+| Legal | [CourtListener](https://www.courtlistener.com/help/api/) · EUR-Lex · Knesset Open Data | none / key | Comparative law + A3 compliance |
+| Medical | [OpenFDA](https://open.fda.gov/apis/) · PubMed · ICD-10 API | none | OrthoCare evidence layer |
+| Finance | CoinGecko · [Frankfurter FX](https://www.frankfurter.app/) · Yahoo Finance | none | LaunchKit market context |
+| Astronomy | [NASA Open APIs](https://api.nasa.gov/) · JPL Horizons | free key | Your space-science interest |
+| Catalog | [public-apis/public-apis](https://github.com/public-apis/public-apis) (1,400+) | varies | Master index for new shelves |
+
+#### R2 — Synthesis · *framework APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Schema generation | OpenAI/Anthropic structured output ✓ wired | key | JSON-schema-conformant outputs |
+| Diagrams | [Mermaid](https://mermaid.js.org/) · [Kroki](https://kroki.io/) | none | Decision trees, system diagrams |
+| Template store | Internal DB (your codified frameworks) | — | LaunchKit `viability_score`, OrthoCare triage, etc. |
+
+#### R3 — Decision · *tradeoff APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Pricing data | Provider pricing pages (cached) | none | Cost-per-1k-token tables |
+| FX rates | Frankfurter | none | USD ↔ ILS for margin math |
+| Risk lookup | OFAC SDN list, sanctioned-IP APIs | none | Compliance check before commit |
+
+#### B1 — Data Layer · *schema enrichment APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Geocoding | [Nominatim](https://nominatim.org/release-docs/latest/api/Overview/) · Mapbox free | none / key | Address → lat/lng on insert |
+| Holidays | [Nager.Date](https://date.nager.at/) | none | Populate work-calendar tables |
+| Currency | Frankfurter | none | Normalize budget fields to USD |
+| Email validation | Hunter free, mail-tester | free tier | Validate `user_invites.email` before save |
+
+#### B2 — Backend / Routes · *runtime APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Auth fallback | Clerk free · Auth0 free | key | Optional SSO for enterprise tenants |
+| Rate limiting | Upstash Redis free | key | Per-route + per-tool budgets |
+| Webhooks in | Telegram ✓ · Stripe · GitHub | key | External events trigger routes |
+
+#### B3 — Scheduler / Cron · *time & event APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Timezones | [TimeAPI.io](https://timeapi.io/) · WorldTimeAPI | none | Cron correctness for global members |
+| Holidays | Nager.Date · Hebcal (Jewish calendar) | none | Skip assignments on Shabbat / Yom Tov |
+| Weather pre-fetch | OpenWeatherMap | free tier | Cache morning forecast so chat is instant |
+| FX pre-fetch | Frankfurter | none | Daily rate snapshot |
+
+#### B4 — Agent / Johnny · *tool-use APIs* (the widest shelf)
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Primary LLMs ✓ wired | Perplexity · OpenAI · Anthropic · Gemini | key | Reasoning & generation |
+| Cheap fallback LLMs | [Groq](https://console.groq.com/) · [Cerebras](https://inference-docs.cerebras.ai/) · HuggingFace Inference | free key | Route low-stakes calls cheaply |
+| Voice STT/TTS | OpenAI Whisper · ElevenLabs free · Coqui (self-host) | key / none | Future voice channel |
+| OCR | Tesseract (self-host) · Mistral OCR free | none / key | Photo → text on Telegram |
+| Image gen | Pollinations · HuggingFace SDXL | none / key | Inline media in chat |
+| Code exec | Local Node sandbox · Piston API | none | Computation tools |
+| Plus every R1 shelf | (re-exposed as Johnny tools) | — | Search/finance/legal/medical/etc. |
+
+#### B5 — Bridge / Notifications · *delivery APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Telegram ✓ wired | Bot API | bot token | Primary phone channel |
+| Push (web) | Web Push (VAPID, free) | self-keys | Browser notifications |
+| Email | Resend free tier · Brevo free | key | Future, only if you lift the "free channels" rule |
+| Calendar invites | ICS generation (no API needed) | — | Attach `.ics` to assignment emails |
+
+#### B6 — Frontend · *UI/asset APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Maps | Leaflet + OSM tiles | none | Project location previews |
+| Charts | Recharts (lib, no API) | — | Dashboards |
+| Avatars | DiceBear · Gravatar | none | Default member avatars |
+| Storage | Cloudinary free · Cloudflare R2 free | key | User uploads, A3 certificates, OrthoCare reports |
+| Translation strings | LibreTranslate | none | Auto-generate Hebrew i18n keys |
+
+#### B7 — Governance & Deploy · *operations APIs*
+| Slot | API / Source | Auth | Purpose |
+|---|---|---|---|
+| Deploy | Railway API ✓ wired · Vercel · Netlify | key | Auto-deploy on push |
+| Git | GitHub API ✓ wired | PAT | Code + PRs |
+| DNS | Cloudflare API | key | Auto-provision tenant subdomains (LaunchKit) |
+| Monitoring | UptimeRobot free · BetterStack free | key | Health checks per service |
+| Cost tracking | Provider billing APIs (OpenAI usage, Anthropic usage) | key | Real margin math per plan |
+| Sanctions/compliance | OFAC SDN, EU sanctions list | none | Block restricted users at sign-up |
+
+### The funnel diagram
 
 ```
-R1 (Research)  ← every new tool added at B4 widens the questions R1 can answer
-     ▲
-     │  Johnny picks cheapest sufficient tool
-     │  (free API > Sonar > GPT > Claude)
-     ▼
-B4 (Agent)     ← tool catalog grows here; each tool = one dispatcher
-     │
-     ▼
-B7 (Governance) ← rate-limit and cost-cap per tool, per plan
+R0 ─ Wikidata, memory, translate
+R1 ─ Sonar, news, academic, legal, medical, finance, astro
+R2 ─ structured-output, Mermaid, template store
+R3 ─ pricing, FX, sanctions
+  ▼
+B1 ─ Nominatim, holidays, currency, email-validate
+B2 ─ auth, rate-limit, webhooks
+B3 ─ time, holidays (Hebcal), weather pre-fetch, FX pre-fetch
+B4 ─ Johnny: every shelf above + LLM fallbacks + voice + OCR + image
+B5 ─ Telegram, web push, email (optional), ICS
+B6 ─ maps, charts, avatars, R2/Cloudinary, translation
+B7 ─ Railway, GitHub, Cloudflare DNS, monitoring, billing, sanctions
 ```
 
-### Why this matters for credit economics
-- A free weather API call costs $0. An LLM answering "will it rain tomorrow in Tel Aviv" without that tool costs credits and may hallucinate.
-- Cron jobs (B3) can pre-fetch and cache: morning weather, daily exchange rates, news headlines — Johnny serves from cache instead of hitting an LLM.
-- Tools you self-host (LibreTranslate, Tesseract) are zero marginal cost forever.
-- The governance layer (B7) sets a per-plan tool budget — free users get 5 tools, pro gets 30, enterprise gets all.
+Johnny doesn't have one tool drawer — he has **eleven shelves**, and the
+layer he's currently in dictates which shelf he reaches for.
 
-### How to add a new tool (the recipe)
-1. **R3 decision** — pick the API, confirm free tier limits, confirm no key OR get a key.
-2. **B4 dispatcher** — add one Johnny tool function (e.g. `weather_query({location, days})`) that wraps the HTTP call.
-3. **B3 cron** (optional) — pre-fetch and cache common queries.
-4. **B7 governance** — register the tool in the plan matrix with rate limits.
-5. **R2 codify** — add the tool to this catalog. Done.
+### The credit-economics argument
+- Free API call to `Nager.Date` for tomorrow's holiday = $0. An LLM answering "is tomorrow a holiday in Israel" = credits + possibly wrong.
+- B3 pre-fetches the common stuff (weather, FX, news headlines) into cache. Johnny serves from cache. LLM only used when the answer needs reasoning.
+- Self-hosted tools (LibreTranslate, Tesseract, Piston) = zero marginal cost forever.
+- B7 governance sets per-plan **tool budgets**: free=5 tools, starter=15, pro=30, enterprise=all.
 
-Each new tool = one PR, one dispatcher, one row in this table. Compounding
-leverage: the more tools Johnny has, the fewer LLM calls you need, the lower
-your cost per answer, the wider the questions you can ask.
+### The 6-step recipe for adding a new API
+1. **Pick the layer** — which shelf does this belong on? (Don't reflexively dump it in B4.)
+2. **R3 decide** — confirm free tier limits, auth method, rate caps.
+3. **B4 dispatcher** — if Johnny needs runtime access, add a tool function (e.g. `holiday_check({date, country})`).
+4. **B3 cron** *(optional)* — pre-fetch + cache if it's called often.
+5. **B7 governance** — register in plan matrix with per-call rate limit + cost cap.
+6. **R2 codify** — add a row to this table on the right shelf. Done.
+
+Each addition = one shelf row, one optional dispatcher, one plan-matrix
+entry. Compounding leverage: more shelves stocked → more questions
+answerable → fewer LLM calls → lower cost → wider business reach.
 
 ---
 
