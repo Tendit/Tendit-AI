@@ -136,5 +136,69 @@ The common shape every time:
 
 ---
 
+## Part V — Tools as Capability Expansion
+
+You nailed the underlying principle: **the architecture is a funnel for
+information sources**. Every free API, scraper, dataset, or service we plug
+into **B4 (Agent / Johnny)** widens what the system can answer and act on.
+More tools = more answerable questions = more credit-efficient routing
+(cheap data tool first, expensive LLM only when needed).
+
+### The tool catalog — what to plug into Johnny
+
+| Domain | Free API / Source | Auth | What it unlocks for you |
+|---|---|---|---|
+| **General data** | [public-apis/public-apis](https://github.com/public-apis/public-apis) (1,400+ catalog) | varies | Master index — pick by use case |
+| **No-key APIs** | [Mixed Analytics list](https://mixedanalytics.com/blog/list-actually-free-open-no-auth-needed-apis/) · [apipheny](https://apipheny.io/free-api/) | none | Instant integration, zero friction |
+| **Web search** | Perplexity Sonar (you have a key) | key | Already wired — your primary research tool |
+| **Weather** | [OpenWeatherMap](https://openweathermap.org/api) | free tier | Current + 5-day forecast for any location — useful for OrthoCare follow-ups, A3 exam scheduling |
+| **Geocoding / maps** | OpenStreetMap Nominatim, Mapbox free tier | none / key | Address → coords, route lookup for assignments |
+| **News** | NewsAPI free tier, Hacker News API, Reddit API | key / none | Industry monitoring for LaunchKit competitor research |
+| **Finance** | Yahoo Finance (unofficial), CoinGecko, Frankfurter (FX) | none | Market context for LaunchKit validation, business decisions |
+| **Legal / regulatory** | CourtListener, EUR-Lex, Israeli Knesset open data | none / key | Your comparative-law research, A3 license compliance |
+| **Health / medical** | OpenFDA, PubMed E-utilities, ICD-10 API | none / key | OrthoCare evidence layer — meds, contraindications, studies |
+| **Astronomy** | NASA APOD + Open APIs, JPL Horizons | free key | Your space science interest, content for chat |
+| **Calendar / time** | TimeAPI.io, public holiday APIs (Nager.Date) | none | Cron scheduling that respects Israeli/global holidays |
+| **Translation** | LibreTranslate self-host, DeepL free tier | none / key | Hebrew ↔ English bridge for Johnny |
+| **OCR / docs** | Tesseract (self-host), Mistral OCR free tier | none / key | Upload-a-photo workflows on Telegram |
+| **Email lookup** | Hunter free tier, mail-tester | free tier | Invite-by-email validation in projects module |
+| **Domain / DNS** | Cloudflare API, WHOIS APIs | key | Auto-provision subdomains for tenant sites |
+| **Phone / SMS (free)** | Telegram Bot API ✓ already wired | bot token | Your primary channel — already done |
+| **Storage** | Cloudinary free tier, R2 free tier | key | Image/PDF hosting for A3 certificates, OrthoCare reports |
+| **Open LLM fallbacks** | Groq free tier, Cerebras free tier, Hugging Face Inference | key | Cheap routing target when Perplexity/Anthropic too expensive |
+
+### The funnel principle (how it maps to the layers)
+
+```
+R1 (Research)  ← every new tool added at B4 widens the questions R1 can answer
+     ▲
+     │  Johnny picks cheapest sufficient tool
+     │  (free API > Sonar > GPT > Claude)
+     ▼
+B4 (Agent)     ← tool catalog grows here; each tool = one dispatcher
+     │
+     ▼
+B7 (Governance) ← rate-limit and cost-cap per tool, per plan
+```
+
+### Why this matters for credit economics
+- A free weather API call costs $0. An LLM answering "will it rain tomorrow in Tel Aviv" without that tool costs credits and may hallucinate.
+- Cron jobs (B3) can pre-fetch and cache: morning weather, daily exchange rates, news headlines — Johnny serves from cache instead of hitting an LLM.
+- Tools you self-host (LibreTranslate, Tesseract) are zero marginal cost forever.
+- The governance layer (B7) sets a per-plan tool budget — free users get 5 tools, pro gets 30, enterprise gets all.
+
+### How to add a new tool (the recipe)
+1. **R3 decision** — pick the API, confirm free tier limits, confirm no key OR get a key.
+2. **B4 dispatcher** — add one Johnny tool function (e.g. `weather_query({location, days})`) that wraps the HTTP call.
+3. **B3 cron** (optional) — pre-fetch and cache common queries.
+4. **B7 governance** — register the tool in the plan matrix with rate limits.
+5. **R2 codify** — add the tool to this catalog. Done.
+
+Each new tool = one PR, one dispatcher, one row in this table. Compounding
+leverage: the more tools Johnny has, the fewer LLM calls you need, the lower
+your cost per answer, the wider the questions you can ask.
+
+---
+
 *Canonical at `aiproxy/ARCHITECTURE_LAYERS.md`. Versioned with the codebase
 so every future session starts from the same stack.*
