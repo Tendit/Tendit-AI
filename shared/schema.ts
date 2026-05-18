@@ -1086,3 +1086,83 @@ export const notifications = sqliteTable("notifications", {
 export type Notification = typeof notifications.$inferSelect;
 export const insertNotificationSchema = createInsertSchema(notifications).omit({ id: true, createdAt: true });
 export type InsertNotification = z.infer<typeof insertNotificationSchema>;
+
+// =====================================================
+// PART VIII — MANAGED SESSIONS (Johnny's Hands on the Logged-In Web)
+// =====================================================
+
+// Managed Sessions — a real browser session logged in as a user on a site.
+export const managedSessions = sqliteTable("managed_sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(), // owner of this session (tendit user)
+  name: text("name").notNull(),
+  site: text("site").notNull(), // fiverr | alibaba | other
+  runtime: text("runtime").notNull().default("mock"), // mock | local_chrome | browserless
+  status: text("status").notNull().default("active"), // active | paused | expired
+  accountLabel: text("account_label"), // "Roy personal Fiverr", etc.
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  lastUsedAt: text("last_used_at"),
+});
+export type ManagedSession = typeof managedSessions.$inferSelect;
+export const insertManagedSessionSchema = createInsertSchema(managedSessions).omit({ id: true, createdAt: true, lastUsedAt: true });
+export type InsertManagedSession = z.infer<typeof insertManagedSessionSchema>;
+
+// Session ↔ profile entity mapping (which legal entity owns the credentials).
+export const sessionAccounts = sqliteTable("session_accounts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sessionId: integer("session_id").notNull(),
+  profileEntity: text("profile_entity").notNull(), // roy_personal | massive_group | a3_academy | orthocare | launchkit
+  credentialsRef: text("credentials_ref"), // human-readable label only; NEVER actual passwords
+  notes: text("notes"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type SessionAccount = typeof sessionAccounts.$inferSelect;
+export const insertSessionAccountSchema = createInsertSchema(sessionAccounts).omit({ id: true, createdAt: true });
+export type InsertSessionAccount = z.infer<typeof insertSessionAccountSchema>;
+
+// Pending actions awaiting manager approval before runtime executes them.
+export const pendingActions = sqliteTable("pending_actions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sessionId: integer("session_id").notNull(),
+  actionType: text("action_type").notNull(), // send_message | request_quote | other
+  payload: text("payload").notNull(), // JSON-encoded action payload
+  reasoning: text("reasoning"), // Johnny's stated reason for proposing this action
+  pageStateHash: text("page_state_hash"), // hash of the page Johnny was looking at
+  screenshotUrl: text("screenshot_url"),
+  status: text("status").notNull().default("pending"), // pending | approved | rejected | executed | failed
+  createdBy: text("created_by").notNull(), // "johnny" or numeric user id stringified
+  reminderSentAt: text("reminder_sent_at"), // tracks the cron "still waiting" ping
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  expiresAt: text("expires_at"),
+});
+export type PendingAction = typeof pendingActions.$inferSelect;
+export const insertPendingActionSchema = createInsertSchema(pendingActions).omit({ id: true, createdAt: true, reminderSentAt: true });
+export type InsertPendingAction = z.infer<typeof insertPendingActionSchema>;
+
+// Manager decisions on pending actions.
+export const actionApprovals = sqliteTable("action_approvals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  actionId: integer("action_id").notNull(),
+  approverId: integer("approver_id").notNull(),
+  decision: text("decision").notNull(), // approve | edit | reject
+  editedPayload: text("edited_payload"), // JSON if approver edited
+  decisionNote: text("decision_note"),
+  decidedAt: text("decided_at").notNull().default(new Date().toISOString()),
+});
+export type ActionApproval = typeof actionApprovals.$inferSelect;
+export const insertActionApprovalSchema = createInsertSchema(actionApprovals).omit({ id: true, decidedAt: true });
+export type InsertActionApproval = z.infer<typeof insertActionApprovalSchema>;
+
+// Append-only audit log of everything that happened to an action.
+export const actionAuditLog = sqliteTable("action_audit_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  actionId: integer("action_id").notNull(),
+  event: text("event").notNull(), // created | approved | rejected | executed | failed
+  beforeStateHash: text("before_state_hash"),
+  afterStateHash: text("after_state_hash"),
+  runtimeResponse: text("runtime_response"), // JSON-encoded result from the BrowserRuntime
+  eventAt: text("event_at").notNull().default(new Date().toISOString()),
+});
+export type ActionAuditLog = typeof actionAuditLog.$inferSelect;
+export const insertActionAuditLogSchema = createInsertSchema(actionAuditLog).omit({ id: true, eventAt: true });
+export type InsertActionAuditLog = z.infer<typeof insertActionAuditLogSchema>;

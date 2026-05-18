@@ -7,7 +7,9 @@ import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from ".
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
 import { captureUserEvent, buildUserStoryArc, buildStoryArcContextForChat } from "./story-arc";
 import { runAgentLoop } from "./agent-orchestrator";
-import { handleTelegramUpdate, notifyOwnerFromWeb, setCallProvider, initTelegramBots, setTelegramWebhook, getTelegramBotInfo, sendTelegramMessage } from "./telegram";
+import { handleTelegramUpdate, notifyOwnerFromWeb, setCallProvider, initTelegramBots, setTelegramWebhook, getTelegramBotInfo, sendTelegramMessage, sendApprovalCard } from "./telegram";
+import { webSearch, fetchPage } from "./web-tools";
+import { getRuntime } from "./runtime";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import multer from "multer";
@@ -1934,6 +1936,110 @@ export async function registerRoutes(
           continue;
         }
 
+        // ---------------------------------------------------------------
+        // Part VII — Web tools: web_search, fetch_page
+        // ---------------------------------------------------------------
+        if (block.action === "web_search") {
+          try {
+            const query = (block.query || block.q || "").toString().trim();
+            if (!query) throw new Error("query is required for web_search");
+            const limit = Math.min(Math.max(parseInt(block.limit, 10) || 8, 1), 15);
+            const results = await webSearch(query, limit);
+            actions.push({ ...block, status: "search_completed", result: results });
+            const preview = results.length
+              ? results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join("\n")
+              : "(no results)";
+            crmQueryContext += `\n[Web Search: ${query}]\n${preview}\n`;
+          } catch (wErr: any) {
+            actions.push({ ...block, status: "web_search_error", error: wErr.message });
+            crmQueryContext += `\n[Web Search Error] ${wErr.message}\n`;
+          }
+          continue;
+        }
+
+        if (block.action === "fetch_page") {
+          try {
+            const url = (block.url || "").toString().trim();
+            if (!url) throw new Error("url is required for fetch_page");
+            const page = await fetchPage(url);
+            actions.push({ ...block, status: "page_fetched", result: { url: page.url, title: page.title, status: page.status, truncated: page.truncated } });
+            const preview = `${page.title || "(untitled)"} — ${page.url}\n${page.text.slice(0, 4000)}${page.truncated ? "\n…" : ""}`;
+            crmQueryContext += `\n[Fetch Page]\n${preview}\n`;
+          } catch (fErr: any) {
+            actions.push({ ...block, status: "fetch_page_error", error: fErr.message });
+            crmQueryContext += `\n[Fetch Page Error] ${fErr.message}\n`;
+          }
+          continue;
+        }
+
+        // ---------------------------------------------------------------
+        // Part VIII — Managed sessions: read_session_page, propose_action
+        // ---------------------------------------------------------------
+        if (block.action === "read_session_page") {
+          try {
+            const sessionId = parseInt(block.sessionId, 10);
+            if (!sessionId) throw new Error("sessionId is required for read_session_page");
+            const session = storage.getManagedSession(sessionId);
+            if (!session) throw new Error(`Managed session ${sessionId} not found`);
+            if (session.userId !== userId) throw new Error("You do not own this managed session");
+            if (session.status !== "active") throw new Error(`Session is ${session.status}`);
+            const runtime = getRuntime(session.runtime);
+            const page = await runtime.readPage(session, { url: block.url });
+            storage.touchSessionLastUsed(sessionId);
+            actions.push({ ...block, status: "session_page_read", result: { title: page.title, url: page.url, stateHash: page.stateHash } });
+            crmQueryContext += `\n[Session ${sessionId} — ${session.site}] ${page.title}\n${page.url}\n${page.visibleText.slice(0, 3000)}\n`;
+          } catch (rErr: any) {
+            actions.push({ ...block, status: "read_session_page_error", error: rErr.message });
+            crmQueryContext += `\n[Session Read Error] ${rErr.message}\n`;
+          }
+          continue;
+        }
+
+        if (block.action === "propose_action") {
+          try {
+            const sessionId = parseInt(block.sessionId, 10);
+            if (!sessionId) throw new Error("sessionId is required for propose_action");
+            const session = storage.getManagedSession(sessionId);
+            if (!session) throw new Error(`Managed session ${sessionId} not found`);
+            if (session.userId !== userId) throw new Error("You do not own this managed session");
+            const actionType = (block.actionType || block.type || "").toString();
+            if (!actionType) throw new Error("actionType is required for propose_action");
+            const payload = block.payload ?? {};
+            const reasoning = (block.reasoning || "").toString();
+            const pageStateHash = block.pageStateHash ? block.pageStateHash.toString() : null;
+            const pending = storage.createPendingAction({
+              sessionId,
+              actionType,
+              payload: typeof payload === "string" ? payload : JSON.stringify(payload),
+              reasoning,
+              pageStateHash,
+              screenshotUrl: block.screenshotUrl || null,
+              status: "pending",
+              createdBy: "johnny",
+              expiresAt: block.expiresAt || null,
+            });
+            // Audit: action proposed.
+            storage.recordAuditEvent({
+              actionId: pending.id,
+              event: "created",
+              beforeStateHash: pageStateHash,
+              afterStateHash: null,
+              runtimeResponse: null,
+            });
+            // Fire-and-forget: send Telegram approval card to the session owner.
+            // We don't await — failure to deliver shouldn't block Johnny's reply.
+            sendApprovalCard(userId, session, pending).catch((err: any) => {
+              console.error("[propose_action] approval card send failed", err?.message);
+            });
+            actions.push({ ...block, status: "action_proposed", result: { id: pending.id } });
+            crmQueryContext += `\n[Pending Action ${pending.id}] ${actionType} on session ${sessionId} — awaiting approval.\n`;
+          } catch (pErr: any) {
+            actions.push({ ...block, status: "propose_action_error", error: pErr.message });
+            crmQueryContext += `\n[Propose Action Error] ${pErr.message}\n`;
+          }
+          continue;
+        }
+
         if (agent.approvalMode === "auto") {
           // Auto-approve: create schedule item immediately
           const request = await storage.createAgentRequest({
@@ -3112,6 +3218,243 @@ export async function registerRoutes(
       const userId = (req as any).userId;
       storage.markAllNotificationsRead(userId);
       return res.json({ message: "All notifications marked as read" });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // =====================================================
+  // Part VIII — Managed Sessions + Pending Actions
+  // =====================================================
+
+  // List managed sessions owned by the current user.
+  app.get("/api/managed-sessions", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      return res.json(storage.listManagedSessions(userId));
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Create a managed session for the current user.
+  app.post("/api/managed-sessions", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { name, site, runtime, status, accountLabel } = req.body || {};
+      if (!name || !site) return res.status(400).json({ message: "name and site are required" });
+      if (!["fiverr", "alibaba", "other"].includes(site)) {
+        return res.status(400).json({ message: `Unsupported site: ${site}` });
+      }
+      const rt = runtime || "mock";
+      if (!["mock", "local_chrome", "browserless"].includes(rt)) {
+        return res.status(400).json({ message: `Unsupported runtime: ${rt}` });
+      }
+      const session = storage.createManagedSession({
+        userId,
+        name,
+        site,
+        runtime: rt,
+        status: status || "active",
+        accountLabel: accountLabel || null,
+      });
+      return res.status(201).json(session);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Get details (session + accounts + recent pending actions) for one session.
+  app.get("/api/managed-sessions/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id, 10);
+      const session = storage.getManagedSession(id);
+      if (!session) return res.status(404).json({ message: "Not found" });
+      if (session.userId !== userId) return res.status(403).json({ message: "Forbidden" });
+      return res.json({
+        session,
+        accounts: storage.listSessionAccounts(id),
+        pendingActions: storage.listPendingActions({ sessionId: id }),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Update session status (active | paused | expired).
+  app.patch("/api/managed-sessions/:id/status", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id, 10);
+      const session = storage.getManagedSession(id);
+      if (!session) return res.status(404).json({ message: "Not found" });
+      if (session.userId !== userId) return res.status(403).json({ message: "Forbidden" });
+      const { status } = req.body || {};
+      if (!["active", "paused", "expired"].includes(status)) {
+        return res.status(400).json({ message: "status must be active | paused | expired" });
+      }
+      return res.json(storage.updateSessionStatus(id, status));
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Add an account mapping (profile entity + credentials label) to a session.
+  app.post("/api/managed-sessions/:id/accounts", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id, 10);
+      const session = storage.getManagedSession(id);
+      if (!session) return res.status(404).json({ message: "Not found" });
+      if (session.userId !== userId) return res.status(403).json({ message: "Forbidden" });
+      const { profileEntity, credentialsRef, notes } = req.body || {};
+      if (!profileEntity) return res.status(400).json({ message: "profileEntity is required" });
+      const allowed = ["roy_personal", "massive_group", "a3_academy", "orthocare", "launchkit"];
+      if (!allowed.includes(profileEntity)) {
+        return res.status(400).json({ message: `profileEntity must be one of: ${allowed.join(", ")}` });
+      }
+      const acct = storage.createSessionAccount({
+        sessionId: id,
+        profileEntity,
+        credentialsRef: credentialsRef || null,
+        notes: notes || null,
+      });
+      return res.status(201).json(acct);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // List pending actions across all sessions the user owns (optionally filter by status).
+  app.get("/api/pending-actions", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const status = (req.query.status as string) || undefined;
+      const ownSessions = storage.listManagedSessions(userId);
+      const ownIds = new Set(ownSessions.map(s => s.id));
+      const all = storage.listPendingActions({ status });
+      return res.json(all.filter(a => ownIds.has(a.sessionId)));
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Get a single pending action (with its approvals + audit log).
+  app.get("/api/pending-actions/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id, 10);
+      const action = storage.getPendingAction(id);
+      if (!action) return res.status(404).json({ message: "Not found" });
+      const session = storage.getManagedSession(action.sessionId);
+      if (!session || session.userId !== userId) return res.status(403).json({ message: "Forbidden" });
+      return res.json({
+        action,
+        session,
+        approvals: storage.listActionApprovals(id),
+        auditLog: storage.listAuditLog(id),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Approve a pending action from the web UI (mirror of the Telegram callback path).
+  app.post("/api/pending-actions/:id/approve", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id, 10);
+      const action = storage.getPendingAction(id);
+      if (!action) return res.status(404).json({ message: "Not found" });
+      const session = storage.getManagedSession(action.sessionId);
+      if (!session || session.userId !== userId) return res.status(403).json({ message: "Forbidden" });
+      if (action.status !== "pending") return res.status(409).json({ message: `Already ${action.status}` });
+
+      const { editedPayload, decisionNote } = req.body || {};
+      storage.updatePendingActionStatus(id, "approved");
+      storage.createActionApproval({
+        actionId: id,
+        approverId: userId,
+        decision: editedPayload ? "edit" : "approve",
+        editedPayload: editedPayload ? (typeof editedPayload === "string" ? editedPayload : JSON.stringify(editedPayload)) : null,
+        decisionNote: decisionNote || null,
+      });
+      storage.recordAuditEvent({
+        actionId: id,
+        event: "approved",
+        beforeStateHash: action.pageStateHash || null,
+        afterStateHash: null,
+        runtimeResponse: null,
+      });
+
+      // Execute via runtime.
+      try {
+        const runtime = getRuntime(session.runtime);
+        const refreshed = storage.getPendingAction(id)!;
+        const result = await runtime.executeApprovedAction(session, refreshed);
+        if (result.ok) {
+          storage.updatePendingActionStatus(id, "executed");
+          storage.recordAuditEvent({
+            actionId: id, event: "executed",
+            beforeStateHash: action.pageStateHash || null,
+            afterStateHash: result.afterStateHash || null,
+            runtimeResponse: JSON.stringify(result),
+          });
+          storage.touchSessionLastUsed(session.id);
+          return res.json({ status: "executed", result });
+        }
+        storage.updatePendingActionStatus(id, "failed");
+        storage.recordAuditEvent({
+          actionId: id, event: "failed",
+          beforeStateHash: action.pageStateHash || null,
+          afterStateHash: result.afterStateHash || null,
+          runtimeResponse: JSON.stringify(result),
+        });
+        return res.status(502).json({ status: "failed", result });
+      } catch (execErr: any) {
+        storage.updatePendingActionStatus(id, "failed");
+        storage.recordAuditEvent({
+          actionId: id, event: "failed",
+          beforeStateHash: action.pageStateHash || null,
+          afterStateHash: null,
+          runtimeResponse: JSON.stringify({ ok: false, error: execErr?.message }),
+        });
+        return res.status(500).json({ status: "failed", error: execErr?.message });
+      }
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Reject a pending action from the web UI.
+  app.post("/api/pending-actions/:id/reject", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id, 10);
+      const action = storage.getPendingAction(id);
+      if (!action) return res.status(404).json({ message: "Not found" });
+      const session = storage.getManagedSession(action.sessionId);
+      if (!session || session.userId !== userId) return res.status(403).json({ message: "Forbidden" });
+      if (action.status !== "pending") return res.status(409).json({ message: `Already ${action.status}` });
+
+      const { decisionNote } = req.body || {};
+      storage.updatePendingActionStatus(id, "rejected");
+      storage.createActionApproval({
+        actionId: id,
+        approverId: userId,
+        decision: "reject",
+        editedPayload: null,
+        decisionNote: decisionNote || null,
+      });
+      storage.recordAuditEvent({
+        actionId: id,
+        event: "rejected",
+        beforeStateHash: action.pageStateHash || null,
+        afterStateHash: null,
+        runtimeResponse: null,
+      });
+      return res.json({ status: "rejected" });
     } catch (e: any) {
       return res.status(500).json({ message: e.message });
     }

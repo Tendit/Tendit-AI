@@ -33,6 +33,12 @@ import {
   type ProjectAssignment, type InsertProjectAssignment, projectAssignments,
   type ProjectMessage, type InsertProjectMessage, projectMessages,
   type Notification, type InsertNotification, notifications,
+  // Managed Sessions (Part VIII)
+  type ManagedSession, type InsertManagedSession, managedSessions,
+  type SessionAccount, type InsertSessionAccount, sessionAccounts,
+  type PendingAction, type InsertPendingAction, pendingActions,
+  type ActionApproval, type InsertActionApproval, actionApprovals,
+  type ActionAuditLog, type InsertActionAuditLog, actionAuditLog,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
   DEFAULT_AGENT_TOOLS, DEFAULT_AGENT_TOOL_RULES,
 } from "@shared/schema";
@@ -138,6 +144,68 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 `);
 console.log('[migrate] project tables ensured');
+
+// Idempotent migration: managed sessions + pending actions (Part VIII).
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS managed_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    site TEXT NOT NULL,
+    runtime TEXT NOT NULL DEFAULT 'mock',
+    status TEXT NOT NULL DEFAULT 'active',
+    account_label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS session_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    profile_entity TEXT NOT NULL,
+    credentials_ref TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS pending_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    action_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    reasoning TEXT,
+    page_state_hash TEXT,
+    screenshot_url TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_by TEXT NOT NULL,
+    reminder_sent_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS action_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id INTEGER NOT NULL,
+    approver_id INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    edited_payload TEXT,
+    decision_note TEXT,
+    decided_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS action_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    before_state_hash TEXT,
+    after_state_hash TEXT,
+    runtime_response TEXT,
+    event_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_managed_sessions_user ON managed_sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_session_accounts_session ON session_accounts(session_id);
+  CREATE INDEX IF NOT EXISTS idx_pending_actions_session ON pending_actions(session_id);
+  CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);
+  CREATE INDEX IF NOT EXISTS idx_action_approvals_action ON action_approvals(action_id);
+  CREATE INDEX IF NOT EXISTS idx_action_audit_log_action ON action_audit_log(action_id);
+`);
+console.log('[migrate] managed sessions tables ensured');
 
 export const db = drizzle(sqlite);
 
@@ -320,6 +388,29 @@ export interface IStorage {
   createNotification(data: InsertNotification): Notification;
   markNotificationRead(id: number, userId: number): void;
   markAllNotificationsRead(userId: number): void;
+
+  // Managed Sessions (Part VIII)
+  listManagedSessions(userId: number): ManagedSession[];
+  getManagedSession(id: number): ManagedSession | undefined;
+  createManagedSession(data: InsertManagedSession): ManagedSession;
+  updateSessionStatus(id: number, status: string): ManagedSession | undefined;
+  touchSessionLastUsed(id: number): void;
+  listSessionAccounts(sessionId: number): SessionAccount[];
+  createSessionAccount(data: InsertSessionAccount): SessionAccount;
+
+  // Pending Actions
+  listPendingActions(filters: { sessionId?: number; status?: string }): PendingAction[];
+  getPendingAction(id: number): PendingAction | undefined;
+  createPendingAction(data: InsertPendingAction): PendingAction;
+  updatePendingActionStatus(id: number, status: string): PendingAction | undefined;
+  setPendingActionReminderSent(id: number, when: string): void;
+  listPendingActionsNeedingReminder(beforeIso: string): PendingAction[];
+
+  // Action Approvals + Audit Log
+  createActionApproval(data: InsertActionApproval): ActionApproval;
+  listActionApprovals(actionId: number): ActionApproval[];
+  recordAuditEvent(data: InsertActionAuditLog): ActionAuditLog;
+  listAuditLog(actionId: number): ActionAuditLog[];
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1842,6 +1933,125 @@ export class DatabaseStorage implements IStorage {
 
   markAllNotificationsRead(userId: number): void {
     db.update(notifications).set({ read: true }).where(eq(notifications.userId, userId)).run();
+  }
+
+  // =====================================================
+  // Managed Sessions (Part VIII)
+  // =====================================================
+
+  listManagedSessions(userId: number): ManagedSession[] {
+    return db.select().from(managedSessions)
+      .where(eq(managedSessions.userId, userId))
+      .orderBy(desc(managedSessions.createdAt))
+      .all();
+  }
+
+  getManagedSession(id: number): ManagedSession | undefined {
+    return db.select().from(managedSessions).where(eq(managedSessions.id, id)).get();
+  }
+
+  createManagedSession(data: InsertManagedSession): ManagedSession {
+    return db.insert(managedSessions).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+
+  updateSessionStatus(id: number, status: string): ManagedSession | undefined {
+    db.update(managedSessions).set({ status }).where(eq(managedSessions.id, id)).run();
+    return this.getManagedSession(id);
+  }
+
+  touchSessionLastUsed(id: number): void {
+    db.update(managedSessions)
+      .set({ lastUsedAt: new Date().toISOString() })
+      .where(eq(managedSessions.id, id))
+      .run();
+  }
+
+  listSessionAccounts(sessionId: number): SessionAccount[] {
+    return db.select().from(sessionAccounts)
+      .where(eq(sessionAccounts.sessionId, sessionId))
+      .all();
+  }
+
+  createSessionAccount(data: InsertSessionAccount): SessionAccount {
+    return db.insert(sessionAccounts).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+
+  // --- Pending Actions ---
+
+  listPendingActions(filters: { sessionId?: number; status?: string }): PendingAction[] {
+    const conds: any[] = [];
+    if (filters.sessionId !== undefined) conds.push(eq(pendingActions.sessionId, filters.sessionId));
+    if (filters.status) conds.push(eq(pendingActions.status, filters.status));
+    const q = conds.length
+      ? db.select().from(pendingActions).where(and(...conds))
+      : db.select().from(pendingActions);
+    return q.orderBy(desc(pendingActions.createdAt)).all();
+  }
+
+  getPendingAction(id: number): PendingAction | undefined {
+    return db.select().from(pendingActions).where(eq(pendingActions.id, id)).get();
+  }
+
+  createPendingAction(data: InsertPendingAction): PendingAction {
+    return db.insert(pendingActions).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+
+  updatePendingActionStatus(id: number, status: string): PendingAction | undefined {
+    db.update(pendingActions).set({ status }).where(eq(pendingActions.id, id)).run();
+    return this.getPendingAction(id);
+  }
+
+  setPendingActionReminderSent(id: number, when: string): void {
+    db.update(pendingActions).set({ reminderSentAt: when }).where(eq(pendingActions.id, id)).run();
+  }
+
+  listPendingActionsNeedingReminder(beforeIso: string): PendingAction[] {
+    return db.select().from(pendingActions)
+      .where(and(
+        eq(pendingActions.status, "pending"),
+        isNull(pendingActions.reminderSentAt),
+        lte(pendingActions.createdAt, beforeIso),
+      ))
+      .all();
+  }
+
+  // --- Action Approvals + Audit ---
+
+  createActionApproval(data: InsertActionApproval): ActionApproval {
+    return db.insert(actionApprovals).values({
+      ...data,
+      decidedAt: new Date().toISOString(),
+    }).returning().get();
+  }
+
+  listActionApprovals(actionId: number): ActionApproval[] {
+    return db.select().from(actionApprovals)
+      .where(eq(actionApprovals.actionId, actionId))
+      .orderBy(desc(actionApprovals.decidedAt))
+      .all();
+  }
+
+  recordAuditEvent(data: InsertActionAuditLog): ActionAuditLog {
+    return db.insert(actionAuditLog).values({
+      ...data,
+      eventAt: new Date().toISOString(),
+    }).returning().get();
+  }
+
+  listAuditLog(actionId: number): ActionAuditLog[] {
+    return db.select().from(actionAuditLog)
+      .where(eq(actionAuditLog.actionId, actionId))
+      .orderBy(actionAuditLog.eventAt)
+      .all();
   }
 }
 

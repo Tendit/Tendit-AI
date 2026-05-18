@@ -20,6 +20,7 @@ import {
   sendTelegramMessage,
   notifyProjectAssignment,
   notifyProjectMembers,
+  sendPendingActionReminder,
 } from "./telegram";
 import { format, parseISO } from "date-fns";
 
@@ -214,6 +215,29 @@ async function runScheduler(): Promise<void> {
         );
       }
     }
+  }
+
+  // ── 3. Pending-action approval reminders (Part VIII) ───────────────────
+  // For any pending_action created ≥30min ago that hasn't been reminded yet,
+  // ping the session owner once and mark reminderSentAt.
+  try {
+    const threshold = new Date(now.getTime() - 30 * 60_000).toISOString();
+    const stale = storage.listPendingActionsNeedingReminder(threshold);
+    for (const action of stale) {
+      try {
+        const session = storage.getManagedSession(action.sessionId);
+        if (!session) continue;
+        await sendPendingActionReminder(session.userId, session, action);
+        storage.setPendingActionReminderSent(action.id, now.toISOString());
+      } catch (e: any) {
+        console.error(
+          `[project-scheduler] pending-action reminder error for action ${action.id}:`,
+          e.message
+        );
+      }
+    }
+  } catch (e: any) {
+    console.error("[project-scheduler] listPendingActionsNeedingReminder error:", e.message);
   }
 }
 

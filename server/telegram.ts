@@ -16,8 +16,9 @@
  */
 
 import { storage } from "./storage";
-import type { TelegramBot, PlatformAgent, TelegramLink } from "@shared/schema";
+import type { TelegramBot, PlatformAgent, TelegramLink, ManagedSession, PendingAction } from "@shared/schema";
 import { buildAgentChatPrompt } from "@shared/schema";
+import { getRuntime } from "./runtime";
 
 // Telegram API helper
 async function tgApi(token: string, method: string, body?: any): Promise<any> {
@@ -75,6 +76,12 @@ export function setCallProvider(fn: (provider: string, model: string, messages: 
  * Process incoming Telegram webhook update
  */
 export async function handleTelegramUpdate(bot: TelegramBot, agent: PlatformAgent, update: any) {
+  // Approval card buttons arrive as callback_query, not message — handle them first.
+  if (update.callback_query) {
+    await handleApprovalCallback(bot, update.callback_query);
+    return;
+  }
+
   const message = update.message;
   if (!message?.text) return; // Only handle text messages for now
 
@@ -804,6 +811,255 @@ export async function notifyProjectMembers(
   } catch (e: any) {
     console.error("[telegram] notifyProjectMembers error:", e.message);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MANAGED SESSIONS — Approval card + callback handling (Part VIII)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the Telegram chat ID for a Tendit user. Looks across all active bots
+ * and picks the first link mapped to this user. Returns null if not linked.
+ */
+async function chatIdForUser(userId: number): Promise<{ token: string; chatId: string } | null> {
+  try {
+    const bots = await storage.getActiveTelegramBots();
+    for (const bot of bots) {
+      if (!bot.botToken) continue;
+      const lnk = await storage.getTelegramLinkByUserId(bot.id, userId);
+      if (lnk && lnk.isActive && lnk.telegramChatId) {
+        return { token: bot.botToken, chatId: lnk.telegramChatId };
+      }
+    }
+  } catch (e: any) {
+    console.error("[telegram] chatIdForUser error:", e?.message);
+  }
+  return null;
+}
+
+/**
+ * Render a pretty preview of a pending action's payload (truncated).
+ */
+function renderActionPreview(action: PendingAction): string {
+  let payloadObj: any = action.payload;
+  try { payloadObj = JSON.parse(action.payload); } catch { /* keep raw */ }
+  const pretty = typeof payloadObj === "string" ? payloadObj : JSON.stringify(payloadObj, null, 2);
+  return pretty.length > 600 ? pretty.slice(0, 600) + "…" : pretty;
+}
+
+/**
+ * Send an approval card to the session owner's Telegram chat.
+ * No-ops gracefully if the user has no linked Telegram chat or no active bot.
+ */
+export async function sendApprovalCard(
+  userId: number,
+  session: ManagedSession,
+  action: PendingAction
+): Promise<void> {
+  const route = await chatIdForUser(userId);
+  if (!route) {
+    console.log(`[telegram] sendApprovalCard: user ${userId} not linked to a bot — skipping.`);
+    return;
+  }
+  const preview = renderActionPreview(action);
+  const reasoning = action.reasoning ? `\n<i>${action.reasoning}</i>\n` : "";
+  const text =
+    `🤖 <b>Johnny wants to act on ${session.site}</b>\n` +
+    `Session: <b>${session.name}</b>${session.accountLabel ? ` (${session.accountLabel})` : ""}\n` +
+    `Action: <code>${action.actionType}</code>${reasoning}\n` +
+    `<pre>${preview.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`;
+
+  await sendTelegramMessage(route.token, route.chatId, text, {
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "✅ Approve", callback_data: `tendit:approve:${action.id}` },
+        { text: "❌ Reject", callback_data: `tendit:reject:${action.id}` },
+      ]],
+    },
+  });
+}
+
+/**
+ * Answer a Telegram callback_query so the loading spinner stops.
+ */
+async function answerCallback(token: string, callbackQueryId: string, text?: string): Promise<void> {
+  await tgApi(token, "answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text: text || "",
+    show_alert: false,
+  });
+}
+
+/**
+ * Edit the original approval card to show the decision result (so the user
+ * gets visual confirmation and the buttons disappear).
+ */
+async function editCardWithResult(
+  token: string,
+  chatId: string,
+  messageId: number,
+  status: string,
+  detail?: string
+): Promise<void> {
+  const lines = [
+    `<b>Decision recorded:</b> ${status}`,
+    detail ? `\n${detail}` : "",
+  ].join("");
+  await tgApi(token, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: lines,
+    parse_mode: "HTML",
+  });
+}
+
+/**
+ * Handle an approve/reject button press on a pending action.
+ */
+export async function handleApprovalCallback(bot: TelegramBot, callbackQuery: any): Promise<void> {
+  const data: string = callbackQuery.data || "";
+  if (!data.startsWith("tendit:")) return; // not our button
+
+  const [, verb, idStr] = data.split(":");
+  const actionId = parseInt(idStr, 10);
+  const chatId = String(callbackQuery.message?.chat?.id || "");
+  const messageId = callbackQuery.message?.message_id;
+  const token = bot.botToken;
+
+  if (!actionId || !chatId || !token) {
+    await answerCallback(token, callbackQuery.id, "Bad callback data");
+    return;
+  }
+
+  // Authorize: caller must own the session this action belongs to.
+  const link = await storage.getTelegramLink(bot.id, chatId);
+  const approverId = link?.userId;
+  const action = storage.getPendingAction(actionId);
+  if (!action) {
+    await answerCallback(token, callbackQuery.id, "Action not found");
+    return;
+  }
+  const session = storage.getManagedSession(action.sessionId);
+  if (!session) {
+    await answerCallback(token, callbackQuery.id, "Session not found");
+    return;
+  }
+  if (!approverId || session.userId !== approverId) {
+    await answerCallback(token, callbackQuery.id, "You can't decide this action");
+    return;
+  }
+  if (action.status !== "pending") {
+    await answerCallback(token, callbackQuery.id, `Already ${action.status}`);
+    return;
+  }
+
+  if (verb === "reject") {
+    storage.updatePendingActionStatus(actionId, "rejected");
+    storage.createActionApproval({
+      actionId,
+      approverId,
+      decision: "reject",
+      editedPayload: null,
+      decisionNote: null,
+    });
+    storage.recordAuditEvent({
+      actionId,
+      event: "rejected",
+      beforeStateHash: action.pageStateHash || null,
+      afterStateHash: null,
+      runtimeResponse: null,
+    });
+    await answerCallback(token, callbackQuery.id, "Rejected");
+    if (messageId) await editCardWithResult(token, chatId, messageId, "❌ Rejected");
+    return;
+  }
+
+  if (verb === "approve") {
+    storage.updatePendingActionStatus(actionId, "approved");
+    storage.createActionApproval({
+      actionId,
+      approverId,
+      decision: "approve",
+      editedPayload: null,
+      decisionNote: null,
+    });
+    storage.recordAuditEvent({
+      actionId,
+      event: "approved",
+      beforeStateHash: action.pageStateHash || null,
+      afterStateHash: null,
+      runtimeResponse: null,
+    });
+    // Execute via the session's runtime. Mock always succeeds.
+    try {
+      const runtime = getRuntime(session.runtime);
+      // Re-fetch action so we get the latest status ("approved").
+      const refreshed = storage.getPendingAction(actionId)!;
+      const result = await runtime.executeApprovedAction(session, refreshed);
+      if (result.ok) {
+        storage.updatePendingActionStatus(actionId, "executed");
+        storage.recordAuditEvent({
+          actionId,
+          event: "executed",
+          beforeStateHash: action.pageStateHash || null,
+          afterStateHash: result.afterStateHash || null,
+          runtimeResponse: JSON.stringify(result),
+        });
+        storage.touchSessionLastUsed(session.id);
+        await answerCallback(token, callbackQuery.id, "Approved & executed");
+        if (messageId) {
+          await editCardWithResult(token, chatId, messageId, "✅ Approved & executed",
+            result.responseText ? `<i>${result.responseText}</i>` : undefined);
+        }
+      } else {
+        storage.updatePendingActionStatus(actionId, "failed");
+        storage.recordAuditEvent({
+          actionId,
+          event: "failed",
+          beforeStateHash: action.pageStateHash || null,
+          afterStateHash: result.afterStateHash || null,
+          runtimeResponse: JSON.stringify(result),
+        });
+        await answerCallback(token, callbackQuery.id, "Runtime reported failure");
+        if (messageId) {
+          await editCardWithResult(token, chatId, messageId, "⚠️ Approved but failed",
+            result.error ? `<i>${result.error}</i>` : undefined);
+        }
+      }
+    } catch (e: any) {
+      storage.updatePendingActionStatus(actionId, "failed");
+      storage.recordAuditEvent({
+        actionId,
+        event: "failed",
+        beforeStateHash: action.pageStateHash || null,
+        afterStateHash: null,
+        runtimeResponse: JSON.stringify({ ok: false, error: e?.message }),
+      });
+      await answerCallback(token, callbackQuery.id, "Execution error");
+      if (messageId) await editCardWithResult(token, chatId, messageId, "⚠️ Execution error", e?.message);
+    }
+    return;
+  }
+
+  await answerCallback(token, callbackQuery.id, "Unknown action");
+}
+
+/**
+ * Send a "still waiting" reminder for a pending action (called from the cron loop).
+ */
+export async function sendPendingActionReminder(
+  userId: number,
+  session: ManagedSession,
+  action: PendingAction
+): Promise<void> {
+  const route = await chatIdForUser(userId);
+  if (!route) return;
+  const text =
+    `⏰ Still waiting on your decision\n` +
+    `Action <code>${action.actionType}</code> on session <b>${session.name}</b> has been pending since ${action.createdAt}.\n` +
+    `Reply via the original approval card.`;
+  await sendTelegramMessage(route.token, route.chatId, text, { parse_mode: "HTML" });
 }
 
 /**

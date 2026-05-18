@@ -32,6 +32,7 @@ import AdminCRMPage from "@/pages/admin/admin-crm";
 import SchedulePage from "@/pages/schedule";
 import ProjectsListPage from "@/pages/projects-list";
 import ProjectDetailPage from "@/pages/project-detail";
+import ProviderSessionsPage from "@/pages/provider-sessions";
 import InviteAcceptPage from "@/pages/invite-accept";
 import { NotificationBell } from "@/components/notification-bell";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -59,6 +60,7 @@ function AppRouter() {
       <Route path="/schedule" component={SchedulePage} />
       <Route path="/projects" component={ProjectsListPage} />
       <Route path="/projects/:id" component={ProjectDetailPage} />
+      <Route path="/provider-sessions" component={ProviderSessionsPage} />
       <Route component={NotFound} />
     </Switch>
   );
