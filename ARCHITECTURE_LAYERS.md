@@ -403,5 +403,149 @@ vendor's pricing changes.
 
 ---
 
+## Part VII — Web/Browse Shelf (Johnny's Eyes on the Open Web)
+
+Up through Part VI, Johnny only had three project-management tools.
+He could not see the open web. Part VII gives him **four capabilities**
+that slot into the R1 (research) and B4 (agent runtime) layers. Each
+capability is itself a 3-tier shelf following the Part VI ladder.
+
+### The four capabilities
+
+| Tool | What it does | R1/B4 layer |
+|---|---|---|
+| `web_search(query, freshness?)` | Google-style query, returns titles + snippets + URLs | R1 |
+| `fetch_page(url, extract_prompt?)` | Pull one URL, optionally ask an LLM to extract specific info | R1 + R2 |
+| `browse_page(url, task)` *(Phase B)* | Full JS execution, click/fill/scroll | B4 |
+| `screenshot_url(url, viewport?)` *(Phase B)* | Visual snapshot of a page | R1 + B4 |
+
+Phase A ships only the first two — they cover ~80% of what Johnny needs
+to answer factual questions ("what's the dollar/shekel today", "summarize
+this article", "who is this Fiverr seller"). Phase B adds JS-rendered
+browsing and screenshots once we have the Mac mini for the heavier work.
+
+### Tier ladder per capability
+
+| Capability | T1 (free) | T2 (cheap) | T3 (expensive) |
+|---|---|---|---|
+| **web_search** | DuckDuckGo HTML, Brave Search Free | Brave API ($3/1k), Serper ($0.30/1k) | Perplexity Sonar, Tavily |
+| **fetch_page** | Node fetch + Readability.js | Jina Reader free (1M tokens/mo), Firecrawl free | Firecrawl paid, Browserless |
+| **browse_page** | Self-hosted Playwright on Mac mini | Browserless hobby, ScrapingBee | Browserless scale, Bright Data |
+| **screenshot_url** | Self-hosted Playwright | ApiFlash free 100/mo, Urlbox | ApiFlash paid |
+
+All four route through the same `pickProvider(capability)` function from
+Part VI, so the price-drift cron and profile pooling already apply.
+
+### Why this is not the same as Part VIII
+
+Part VII reads the **public** web. No accounts, no cookies, no login.
+If a Fiverr seller's profile is public, `fetch_page` can read it.
+If the page requires login (the inbox, the order page, the buyer
+dashboard), Part VII cannot. That's what Part VIII is for.
+
+---
+
+## Part VIII — Managed Sessions (Johnny's Hands on the Logged-In Web)
+
+The core idea: Johnny operates a **real Chrome browser logged into your
+real accounts** (Fiverr, Alibaba, etc.) under **manager approval for
+every outbound action**. No scraping. No bot accounts. No headless
+fingerprinting risk.
+
+This is the human-in-the-loop computer-use pattern: agent reads page,
+proposes action, pauses, manager approves/edits/rejects in Telegram or
+the Tendit dashboard, agent executes.
+
+### Layer touches
+
+| Layer | What gets added |
+|---|---|
+| R0 Intent | New intent type: `provider_outreach` |
+| B1 Schema | `managed_sessions`, `session_accounts`, `pending_actions`, `action_approvals` |
+| B2 Routes | List sessions, queue action, approve/reject, replay, audit log |
+| B3 Cron | Session keepalive (refresh cookies), stale-approval reminder |
+| B4 Agent | New tools: `read_session_page`, `propose_action`, `wait_for_approval` |
+| B5 Telegram | Approval cards with inline Approve / Edit / Reject keyboard |
+| B6 Frontend | New **Provider Sessions** page: live screenshot + pending queue + audit log |
+| B7 Governance | Every action logged with approver, timestamp, page state hash |
+
+### Runtime tier ladder
+
+The browser runtime is itself a tiered shelf. Same `pickProvider()` lookup.
+
+| Tier | Runtime | Cost | Fingerprint risk | When to use |
+|---|---|---|---|---|
+| **T1 — owned hardware** | Mac mini at office running real Chrome, persistent profile | $599 once + $0/mo | None — it IS a real desktop | Fiverr, Alibaba, anything anti-bot-aggressive |
+| **T2 — cloud headless** | Browserless with persistent session ID | Free 1k/mo per account × 5 = 5k/mo | Medium — they fingerprint headless | Low-risk sites, internal tools |
+| **T3 — anti-detect cloud** | Bright Data Scraping Browser, Multilogin | $$$/session | Lowest of cloud options | Fallback only |
+
+### The interface
+
+```ts
+interface BrowserRuntime {
+  openPage(sessionId: string, url: string): Promise<PageState>;
+  readPage(sessionId: string): Promise<PageState>;
+  proposeAction(sessionId: string, action: Action): Promise<{ actionId: string }>;
+  executeApprovedAction(actionId: string): Promise<ActionResult>;
+  screenshot(sessionId: string): Promise<Buffer>;
+}
+```
+
+Three implementations on the shelf:
+- `MockRuntime` — canned page state, used for Phase A end-to-end testing before hardware arrives
+- `LocalChromeRuntime` — talks to the Mac mini relay agent over Cloudflare Tunnel (Phase B)
+- `BrowserlessRuntime` — cloud fallback (Phase B+)
+
+Swapping runtimes = one row update in `tool_providers`. Same Part VI
+anti-fragility property applied to runtimes instead of APIs.
+
+### The approval flow
+
+1. **Johnny reads the page** via `read_session_page(sessionId)` and decides an action is needed ("send this draft message to seller X")
+2. **Johnny calls `propose_action`** with the action payload + reasoning + page state hash
+3. **Tendit creates a `pending_action` row** and pushes notifications: Telegram card to manager, badge on Provider Sessions page
+4. **Manager reviews** in either channel: sees draft text, page screenshot, reasoning. Picks Approve / Edit / Reject
+5. **On approval**, Tendit calls `executeApprovedAction(actionId)` against the runtime; runtime clicks Send in real Chrome
+6. **Result + screenshot logged** to `action_approvals` with manager ID, timestamp, before/after page state
+
+Every outbound action has a manager signature. No agent ever sends
+autonomously. This is the contract you set in the May 18 thread.
+
+### Phase A vs Phase B split
+
+| Phase | Ships | Hardware needed |
+|---|---|---|
+| **A1** | Part VII tools (`web_search`, `fetch_page`) | No |
+| **A2** | Part VIII schema + routes + frontend + Telegram + `MockRuntime` | No |
+| **B** | Mac mini relay agent + `LocalChromeRuntime` + first Fiverr adapter | Yes — Mac mini at office |
+
+Phase A delivers a **fully tested approval flow** against the mock, so
+when the Mac mini arrives we only need to write the relay agent (~200
+lines) and the Fiverr-specific selectors. The schema, the UI, the
+approval queue, the audit log, the Telegram cards — all already shipped
+and battle-tested against the mock.
+
+### Site adapters
+
+Each marketplace gets its own adapter under `server/adapters/`:
+
+```
+server/adapters/
+  fiverr.ts       # selectors: inbox, compose, send, profile
+  alibaba.ts      # selectors: RFQ, supplier message, quote
+  _adapter.ts     # shared adapter interface
+```
+
+Adapter responsibilities:
+- Recognize "are we on the right page?"
+- Extract structured page state (current thread, seller name, last message)
+- Map abstract actions (`sendMessage`, `requestQuote`) to concrete DOM clicks
+- Detect anti-bot challenges and pause for manager intervention
+
+Adding a new marketplace = one new adapter file + one row in
+`tool_providers`. Same shelf pattern. Same anti-fragility.
+
+---
+
 *Canonical at `aiproxy/ARCHITECTURE_LAYERS.md`. Versioned with the codebase
 so every future session starts from the same stack.*
