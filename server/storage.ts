@@ -39,6 +39,17 @@ import {
   type PendingAction, type InsertPendingAction, pendingActions,
   type ActionApproval, type InsertActionApproval, actionApprovals,
   type ActionAuditLog, type InsertActionAuditLog, actionAuditLog,
+  // Part IX
+  type Agent, type InsertAgent, agents,
+  type P9AgentAssignment, type InsertP9AgentAssignment, p9AgentAssignments,
+  type Milestone, type InsertMilestone, milestones,
+  type MilestoneDep, type InsertMilestoneDep, milestoneDeps,
+  type UserCredits, userCredits,
+  type ProjectCredits, projectCredits,
+  type CreditLedger, type InsertCreditLedger, creditLedger,
+  type CreditPackage, type InsertCreditPackage, creditPackages,
+  type SystemCreditQueue, type InsertSystemCreditQueue, systemCreditQueue,
+  type AuthProfile, type InsertAuthProfile, authProfiles,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
   DEFAULT_AGENT_TOOLS, DEFAULT_AGENT_TOOL_RULES,
 } from "@shared/schema";
@@ -206,6 +217,207 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_action_audit_log_action ON action_audit_log(action_id);
 `);
 console.log('[migrate] managed sessions tables ensured');
+
+// Idempotent migration: Part IX — multi-project operations.
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS agents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    system_prompt TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p9_agent_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    project_id INTEGER,
+    capability TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 100,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS milestones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    due_date TEXT,
+    status TEXT NOT NULL DEFAULT 'locked',
+    agent_assignment_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    completed_by INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS milestone_deps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    milestone_id INTEGER NOT NULL,
+    depends_on_milestone_id INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS user_credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    balance INTEGER NOT NULL DEFAULT 0,
+    overdraft_balance INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS project_credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL UNIQUE,
+    balance INTEGER NOT NULL DEFAULT 0,
+    overdraft_balance INTEGER NOT NULL DEFAULT 0,
+    overdraft_ceiling INTEGER NOT NULL DEFAULT 500,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS credit_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER,
+    user_id INTEGER NOT NULL,
+    txn_type TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    action_ref TEXT,
+    stripe_charge_id TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS credit_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    credits INTEGER NOT NULL,
+    price_usd INTEGER NOT NULL,
+    price_ils INTEGER NOT NULL,
+    stripe_price_id TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 100
+  );
+  CREATE TABLE IF NOT EXISTS system_credit_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    action_payload TEXT NOT NULL,
+    estimated_credits INTEGER NOT NULL DEFAULT 0,
+    requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    status TEXT NOT NULL DEFAULT 'awaiting',
+    approved_by INTEGER,
+    approved_at TEXT,
+    result_ref TEXT
+  );
+  CREATE TABLE IF NOT EXISTS auth_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    credentials_ref TEXT NOT NULL,
+    daily_quota INTEGER NOT NULL DEFAULT 0,
+    daily_used INTEGER NOT NULL DEFAULT 0,
+    quota_reset_at TEXT NOT NULL DEFAULT (datetime('now')),
+    status TEXT NOT NULL DEFAULT 'active',
+    last_used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_p9_agent_assignments_project ON p9_agent_assignments(project_id);
+  CREATE INDEX IF NOT EXISTS idx_p9_agent_assignments_capability ON p9_agent_assignments(capability);
+  CREATE INDEX IF NOT EXISTS idx_milestones_project ON milestones(project_id);
+  CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
+  CREATE INDEX IF NOT EXISTS idx_milestone_deps_milestone ON milestone_deps(milestone_id);
+  CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id);
+  CREATE INDEX IF NOT EXISTS idx_credit_ledger_project ON credit_ledger(project_id);
+  CREATE INDEX IF NOT EXISTS idx_system_credit_queue_status ON system_credit_queue(status);
+  CREATE INDEX IF NOT EXISTS idx_auth_profiles_provider ON auth_profiles(provider);
+`);
+// Extend project_messages with audio/ack columns (idempotent via try/catch — SQLite ALTER fails on duplicate).
+for (const sqlStr of [
+  `ALTER TABLE project_messages ADD COLUMN audio_url TEXT`,
+  `ALTER TABLE project_messages ADD COLUMN transcript TEXT`,
+  `ALTER TABLE project_messages ADD COLUMN duration_sec INTEGER`,
+  `ALTER TABLE project_messages ADD COLUMN is_ack INTEGER NOT NULL DEFAULT 0`,
+]) {
+  try { sqlite.exec(sqlStr); } catch { /* column exists; ignore */ }
+}
+console.log('[migrate] part IX tables ensured');
+
+// Seed Part IX baseline data (idempotent: ON slug conflict, skip).
+try {
+  // 1) 11 projects (only insert if slug doesn't exist by name lookup; projects table has no slug column,
+  //    so we use name as the natural key for idempotency).
+  const adminRow = sqlite.prepare(`SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1`).get() as { id: number } | undefined;
+  const seedOwner = adminRow?.id;
+  if (seedOwner) {
+    const portfolio: Array<{ name: string; description: string; status: string }> = [
+      { name: 'Massive Group', description: 'Parent holding company', status: 'active' },
+      { name: 'A3 Academy', description: 'Education platform (live at a3m.pplx.app)', status: 'active' },
+      { name: 'OrthoCare AI', description: 'Medical AI build', status: 'active' },
+      { name: 'LaunchKit', description: 'Active build', status: 'active' },
+      { name: 'Tendit AI', description: 'This platform', status: 'active' },
+      { name: 'SPC Pool Safety', description: 'Grant-stage venture', status: 'planning' },
+      { name: 'Foraviset Biotech', description: 'Fundraising stage', status: 'planning' },
+      { name: 'HaTala / Lati Fridges', description: 'Concept', status: 'planning' },
+      { name: 'AI Listening Service', description: 'Concept', status: 'planning' },
+      { name: 'Personal OS / Private Phone', description: 'Research', status: 'planning' },
+      { name: 'AI Game Dev', description: 'Research', status: 'planning' },
+    ];
+    const insertProject = sqlite.prepare(
+      `INSERT INTO projects (name, description, owner_id, status, priority, color, created_at, updated_at)
+       VALUES (@name, @description, @owner_id, @status, 'medium', '#0d9488', datetime('now'), datetime('now'))`
+    );
+    const findProject = sqlite.prepare(`SELECT id FROM projects WHERE name = ?`);
+    for (const p of portfolio) {
+      const existing = findProject.get(p.name) as { id: number } | undefined;
+      if (!existing) {
+        insertProject.run({ name: p.name, description: p.description, owner_id: seedOwner, status: p.status });
+      }
+    }
+  }
+
+  // 2) Default Johnny agent
+  const johnnyExisting = sqlite.prepare(`SELECT id FROM agents WHERE slug = 'johnny'`).get() as { id: number } | undefined;
+  let johnnyId = johnnyExisting?.id;
+  if (!johnnyId) {
+    const result = sqlite.prepare(
+      `INSERT INTO agents (name, slug, provider, model, capabilities, system_prompt, status, created_at)
+       VALUES ('Johnny', 'johnny', 'anthropic', 'claude-sonnet-4-5',
+               '["chat_reply","tool_use","planning"]',
+               'You are Johnny, the Tendit project assistant. Be concise, helpful, and project-aware.',
+               'active', datetime('now'))`
+    ).run();
+    johnnyId = Number(result.lastInsertRowid);
+  }
+
+  // 3) Default global assignment for chat_reply
+  if (johnnyId) {
+    const existingAssn = sqlite.prepare(
+      `SELECT id FROM p9_agent_assignments WHERE agent_id = ? AND project_id IS NULL AND capability = 'chat_reply'`
+    ).get(johnnyId);
+    if (!existingAssn) {
+      sqlite.prepare(
+        `INSERT INTO p9_agent_assignments (agent_id, project_id, capability, priority, created_at)
+         VALUES (?, NULL, 'chat_reply', 100, datetime('now'))`
+      ).run(johnnyId);
+    }
+  }
+
+  // 4) Credit packages
+  const packages: Array<{ slug: string; name: string; credits: number; usd: number; ils: number; sort: number }> = [
+    { slug: 'starter', name: 'Starter', credits: 100, usd: 500, ils: 1850, sort: 1 },
+    { slug: 'growth', name: 'Growth', credits: 500, usd: 2000, ils: 7400, sort: 2 },
+    { slug: 'pro', name: 'Pro', credits: 2000, usd: 7000, ils: 25900, sort: 3 },
+    { slug: 'scale', name: 'Scale', credits: 10000, usd: 30000, ils: 111000, sort: 4 },
+  ];
+  const findPkg = sqlite.prepare(`SELECT id FROM credit_packages WHERE slug = ?`);
+  const insertPkg = sqlite.prepare(
+    `INSERT INTO credit_packages (slug, name, credits, price_usd, price_ils, active, sort_order)
+     VALUES (@slug, @name, @credits, @usd, @ils, 1, @sort)`
+  );
+  for (const p of packages) {
+    if (!findPkg.get(p.slug)) insertPkg.run(p);
+  }
+  console.log('[migrate] part IX seed completed');
+} catch (e: any) {
+  console.error('[migrate] part IX seed error:', e?.message);
+}
 
 export const db = drizzle(sqlite);
 
@@ -411,6 +623,61 @@ export interface IStorage {
   listActionApprovals(actionId: number): ActionApproval[];
   recordAuditEvent(data: InsertActionAuditLog): ActionAuditLog;
   listAuditLog(actionId: number): ActionAuditLog[];
+
+  // --- Part IX: Agents (Part IX `agents` table; distinct from `platform_agents`) ---
+  listP9Agents(): Agent[];
+  getP9Agent(id: number): Agent | undefined;
+  getP9AgentBySlug(slug: string): Agent | undefined;
+  createP9Agent(data: InsertAgent): Agent;
+  updateP9Agent(id: number, patch: Partial<InsertAgent>): Agent | undefined;
+
+  // --- Part IX: Agent assignments ---
+  createAgentAssignment(data: InsertP9AgentAssignment): P9AgentAssignment;
+  listAgentAssignments(filters?: { projectId?: number | null; capability?: string }): P9AgentAssignment[];
+  deleteAgentAssignment(id: number): void;
+  resolveAgent(projectId: number, capability: string): Agent | undefined;
+
+  // --- Part IX: Milestones ---
+  createMilestone(data: InsertMilestone): Milestone;
+  listProjectMilestones(projectId: number): Milestone[];
+  getMilestone(id: number): Milestone | undefined;
+  updateMilestoneStatus(id: number, status: string, completedBy?: number): Milestone | undefined;
+  updateMilestone(id: number, patch: Partial<InsertMilestone>): Milestone | undefined;
+  addMilestoneDep(milestoneId: number, dependsOnId: number): MilestoneDep;
+  removeMilestoneDep(id: number): void;
+  getMilestoneDeps(milestoneId: number): MilestoneDep[];
+  getMilestonesReadyToUnlock(): Milestone[];
+
+  // --- Part IX: Credits ---
+  ensureUserCreditsRow(userId: number): UserCredits;
+  ensureProjectCreditsRow(projectId: number): ProjectCredits;
+  getUserCredits(userId: number): UserCredits;
+  getProjectCredits(projectId: number): ProjectCredits;
+  debitCredits(args: { userId: number; projectId?: number | null; amount: number; txnType?: string; actionRef?: string; note?: string }):
+    { ok: true; balanceAfter: number; queued: false }
+    | { ok: false; queued: true; queueId: number; reason: string };
+  creditCredits(args: { userId: number; projectId?: number | null; amount: number; txnType?: string; stripeChargeId?: string; note?: string }):
+    { ok: true; balanceAfter: number; settled: number };
+  settleOverdraft(target: { projectId?: number; userId?: number }, amount: number): number;
+  listCreditLedger(filters?: { userId?: number; projectId?: number; limit?: number }): CreditLedger[];
+
+  // --- Part IX: System credit queue ---
+  createQueuedAction(data: InsertSystemCreditQueue): SystemCreditQueue;
+  listSystemQueue(status?: string): SystemCreditQueue[];
+  approveQueuedAction(queueId: number, adminId: number): SystemCreditQueue | undefined;
+  denyQueuedAction(queueId: number, adminId: number, note?: string): SystemCreditQueue | undefined;
+
+  // --- Part IX: Credit packages ---
+  listCreditPackages(): CreditPackage[];
+  getCreditPackageBySlug(slug: string): CreditPackage | undefined;
+
+  // --- Part IX: Auth profiles ---
+  listAuthProfiles(provider?: string): AuthProfile[];
+  pickAuthProfile(provider: string): AuthProfile | undefined;
+  incrementProfileUsage(profileId: number): void;
+
+  // --- Part IX: Project messages voice helper ---
+  transcribeAndStoreVoice(messageId: number, transcript: string): void;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2052,6 +2319,383 @@ export class DatabaseStorage implements IStorage {
       .where(eq(actionAuditLog.actionId, actionId))
       .orderBy(actionAuditLog.eventAt)
       .all();
+  }
+
+  // =====================================================
+  // PART IX implementations
+  // =====================================================
+
+  // --- Part IX Agents ---
+  listP9Agents(): Agent[] {
+    return db.select().from(agents).orderBy(desc(agents.createdAt)).all();
+  }
+  getP9Agent(id: number): Agent | undefined {
+    return db.select().from(agents).where(eq(agents.id, id)).get();
+  }
+  getP9AgentBySlug(slug: string): Agent | undefined {
+    return db.select().from(agents).where(eq(agents.slug, slug)).get();
+  }
+  createP9Agent(data: InsertAgent): Agent {
+    return db.insert(agents).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  updateP9Agent(id: number, patch: Partial<InsertAgent>): Agent | undefined {
+    db.update(agents).set(patch as any).where(eq(agents.id, id)).run();
+    return this.getP9Agent(id);
+  }
+
+  // --- Agent assignments ---
+  createAgentAssignment(data: InsertP9AgentAssignment): P9AgentAssignment {
+    return db.insert(p9AgentAssignments).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  listAgentAssignments(filters: { projectId?: number | null; capability?: string } = {}): P9AgentAssignment[] {
+    const conds: any[] = [];
+    if (filters.projectId === null) conds.push(isNull(p9AgentAssignments.projectId));
+    else if (filters.projectId !== undefined) conds.push(eq(p9AgentAssignments.projectId, filters.projectId));
+    if (filters.capability) conds.push(eq(p9AgentAssignments.capability, filters.capability));
+    const q = conds.length
+      ? db.select().from(p9AgentAssignments).where(and(...conds))
+      : db.select().from(p9AgentAssignments);
+    return q.orderBy(p9AgentAssignments.priority).all();
+  }
+  deleteAgentAssignment(id: number): void {
+    db.delete(p9AgentAssignments).where(eq(p9AgentAssignments.id, id)).run();
+  }
+  resolveAgent(projectId: number, capability: string): Agent | undefined {
+    // 1) project-specific
+    const projectRow = db.select().from(p9AgentAssignments)
+      .where(and(eq(p9AgentAssignments.projectId, projectId), eq(p9AgentAssignments.capability, capability)))
+      .orderBy(p9AgentAssignments.priority)
+      .get();
+    if (projectRow) {
+      const a = this.getP9Agent(projectRow.agentId);
+      if (a) return a;
+    }
+    // 2) global default (projectId IS NULL)
+    const globalRow = db.select().from(p9AgentAssignments)
+      .where(and(isNull(p9AgentAssignments.projectId), eq(p9AgentAssignments.capability, capability)))
+      .orderBy(p9AgentAssignments.priority)
+      .get();
+    if (globalRow) {
+      const a = this.getP9Agent(globalRow.agentId);
+      if (a) return a;
+    }
+    // 3) fallback Johnny
+    return this.getP9AgentBySlug("johnny");
+  }
+
+  // --- Milestones ---
+  createMilestone(data: InsertMilestone): Milestone {
+    return db.insert(milestones).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  listProjectMilestones(projectId: number): Milestone[] {
+    return db.select().from(milestones)
+      .where(eq(milestones.projectId, projectId))
+      .orderBy(milestones.dueDate)
+      .all();
+  }
+  getMilestone(id: number): Milestone | undefined {
+    return db.select().from(milestones).where(eq(milestones.id, id)).get();
+  }
+  updateMilestoneStatus(id: number, status: string, completedBy?: number): Milestone | undefined {
+    const patch: any = { status };
+    if (status === "done") {
+      patch.completedAt = new Date().toISOString();
+      if (completedBy) patch.completedBy = completedBy;
+    }
+    db.update(milestones).set(patch).where(eq(milestones.id, id)).run();
+    return this.getMilestone(id);
+  }
+  updateMilestone(id: number, patch: Partial<InsertMilestone>): Milestone | undefined {
+    db.update(milestones).set(patch as any).where(eq(milestones.id, id)).run();
+    return this.getMilestone(id);
+  }
+  addMilestoneDep(milestoneId: number, dependsOnId: number): MilestoneDep {
+    return db.insert(milestoneDeps).values({ milestoneId, dependsOnMilestoneId: dependsOnId }).returning().get();
+  }
+  removeMilestoneDep(id: number): void {
+    db.delete(milestoneDeps).where(eq(milestoneDeps.id, id)).run();
+  }
+  getMilestoneDeps(milestoneId: number): MilestoneDep[] {
+    return db.select().from(milestoneDeps).where(eq(milestoneDeps.milestoneId, milestoneId)).all();
+  }
+  getMilestonesReadyToUnlock(): Milestone[] {
+    // Locked milestones whose every dependency is done.
+    const locked = db.select().from(milestones).where(eq(milestones.status, "locked")).all();
+    const ready: Milestone[] = [];
+    for (const m of locked) {
+      const deps = this.getMilestoneDeps(m.id);
+      if (deps.length === 0) continue; // no deps — don't auto-unlock; admin sets these explicitly
+      let allDone = true;
+      for (const d of deps) {
+        const prereq = this.getMilestone(d.dependsOnMilestoneId);
+        if (!prereq || prereq.status !== "done") { allDone = false; break; }
+      }
+      if (allDone) ready.push(m);
+    }
+    return ready;
+  }
+
+  // --- Credits ---
+  ensureUserCreditsRow(userId: number): UserCredits {
+    const existing = db.select().from(userCredits).where(eq(userCredits.userId, userId)).get();
+    if (existing) return existing;
+    return db.insert(userCredits).values({
+      userId, balance: 0, overdraftBalance: 0,
+      updatedAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  ensureProjectCreditsRow(projectId: number): ProjectCredits {
+    const existing = db.select().from(projectCredits).where(eq(projectCredits.projectId, projectId)).get();
+    if (existing) return existing;
+    return db.insert(projectCredits).values({
+      projectId, balance: 0, overdraftBalance: 0, overdraftCeiling: 500,
+      updatedAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  getUserCredits(userId: number): UserCredits {
+    return this.ensureUserCreditsRow(userId);
+  }
+  getProjectCredits(projectId: number): ProjectCredits {
+    return this.ensureProjectCreditsRow(projectId);
+  }
+  debitCredits(args: { userId: number; projectId?: number | null; amount: number; txnType?: string; actionRef?: string; note?: string }):
+    { ok: true; balanceAfter: number; queued: false }
+    | { ok: false; queued: true; queueId: number; reason: string }
+  {
+    const { userId, projectId, amount } = args;
+    const txnType = args.txnType || "debit";
+    const amt = Math.max(0, Math.ceil(amount));
+    if (amt === 0) {
+      return { ok: true, balanceAfter: projectId ? this.getProjectCredits(projectId).balance : this.getUserCredits(userId).balance, queued: false };
+    }
+    if (projectId) {
+      const pc = this.ensureProjectCreditsRow(projectId);
+      if (pc.balance >= amt) {
+        const newBal = pc.balance - amt;
+        db.update(projectCredits).set({ balance: newBal, updatedAt: new Date().toISOString() })
+          .where(eq(projectCredits.projectId, projectId)).run();
+        db.insert(creditLedger).values({
+          projectId, userId, txnType, amount: -amt, balanceAfter: newBal,
+          actionRef: args.actionRef || null, stripeChargeId: null, note: args.note || null,
+          createdAt: new Date().toISOString(),
+        }).run();
+        return { ok: true, balanceAfter: newBal, queued: false };
+      }
+      // Balance exhausted — queue for system approval
+      const queued = db.insert(systemCreditQueue).values({
+        projectId, userId, actionPayload: JSON.stringify({ amount: amt, actionRef: args.actionRef, note: args.note }),
+        estimatedCredits: amt, status: "awaiting",
+        requestedAt: new Date().toISOString(),
+      }).returning().get();
+      return { ok: false, queued: true, queueId: queued.id, reason: "project_balance_exhausted" };
+    } else {
+      const uc = this.ensureUserCreditsRow(userId);
+      if (uc.balance >= amt) {
+        const newBal = uc.balance - amt;
+        db.update(userCredits).set({ balance: newBal, updatedAt: new Date().toISOString() })
+          .where(eq(userCredits.userId, userId)).run();
+        db.insert(creditLedger).values({
+          projectId: null, userId, txnType, amount: -amt, balanceAfter: newBal,
+          actionRef: args.actionRef || null, stripeChargeId: null, note: args.note || null,
+          createdAt: new Date().toISOString(),
+        }).run();
+        return { ok: true, balanceAfter: newBal, queued: false };
+      }
+      // Personal balance exhausted: still queue (admins can decide).
+      const queued = db.insert(systemCreditQueue).values({
+        projectId: 0 as any, userId, actionPayload: JSON.stringify({ amount: amt, actionRef: args.actionRef, note: args.note }),
+        estimatedCredits: amt, status: "awaiting",
+        requestedAt: new Date().toISOString(),
+      }).returning().get();
+      return { ok: false, queued: true, queueId: queued.id, reason: "user_balance_exhausted" };
+    }
+  }
+  creditCredits(args: { userId: number; projectId?: number | null; amount: number; txnType?: string; stripeChargeId?: string; note?: string }):
+    { ok: true; balanceAfter: number; settled: number }
+  {
+    const { userId, projectId, amount } = args;
+    const txnType = args.txnType || "credit";
+    const amt = Math.max(0, Math.ceil(amount));
+    let settled = 0;
+    let remaining = amt;
+    if (projectId) {
+      const pc = this.ensureProjectCreditsRow(projectId);
+      if (pc.overdraftBalance > 0 && remaining > 0) {
+        settled = Math.min(pc.overdraftBalance, remaining);
+        remaining -= settled;
+        db.update(projectCredits).set({
+          overdraftBalance: pc.overdraftBalance - settled,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(projectCredits.projectId, projectId)).run();
+        db.insert(creditLedger).values({
+          projectId, userId, txnType: "overdraft_settle", amount: -settled,
+          balanceAfter: pc.overdraftBalance - settled,
+          actionRef: null, stripeChargeId: args.stripeChargeId || null,
+          note: args.note || "overdraft settlement",
+          createdAt: new Date().toISOString(),
+        }).run();
+      }
+      const newBal = (this.getProjectCredits(projectId).balance) + remaining;
+      db.update(projectCredits).set({ balance: newBal, updatedAt: new Date().toISOString() })
+        .where(eq(projectCredits.projectId, projectId)).run();
+      db.insert(creditLedger).values({
+        projectId, userId, txnType, amount: remaining, balanceAfter: newBal,
+        actionRef: null, stripeChargeId: args.stripeChargeId || null, note: args.note || null,
+        createdAt: new Date().toISOString(),
+      }).run();
+      return { ok: true, balanceAfter: newBal, settled };
+    }
+    const uc = this.ensureUserCreditsRow(userId);
+    if (uc.overdraftBalance > 0 && remaining > 0) {
+      settled = Math.min(uc.overdraftBalance, remaining);
+      remaining -= settled;
+      db.update(userCredits).set({
+        overdraftBalance: uc.overdraftBalance - settled,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(userCredits.userId, userId)).run();
+      db.insert(creditLedger).values({
+        projectId: null, userId, txnType: "overdraft_settle", amount: -settled,
+        balanceAfter: uc.overdraftBalance - settled,
+        actionRef: null, stripeChargeId: args.stripeChargeId || null,
+        note: args.note || "overdraft settlement",
+        createdAt: new Date().toISOString(),
+      }).run();
+    }
+    const newBal = this.getUserCredits(userId).balance + remaining;
+    db.update(userCredits).set({ balance: newBal, updatedAt: new Date().toISOString() })
+      .where(eq(userCredits.userId, userId)).run();
+    db.insert(creditLedger).values({
+      projectId: null, userId, txnType, amount: remaining, balanceAfter: newBal,
+      actionRef: null, stripeChargeId: args.stripeChargeId || null, note: args.note || null,
+      createdAt: new Date().toISOString(),
+    }).run();
+    return { ok: true, balanceAfter: newBal, settled };
+  }
+  settleOverdraft(target: { projectId?: number; userId?: number }, amount: number): number {
+    const amt = Math.max(0, Math.ceil(amount));
+    if (target.projectId) {
+      const pc = this.ensureProjectCreditsRow(target.projectId);
+      const newOd = pc.overdraftBalance + amt;
+      db.update(projectCredits).set({ overdraftBalance: newOd, updatedAt: new Date().toISOString() })
+        .where(eq(projectCredits.projectId, target.projectId)).run();
+      return newOd;
+    }
+    if (target.userId) {
+      const uc = this.ensureUserCreditsRow(target.userId);
+      const newOd = uc.overdraftBalance + amt;
+      db.update(userCredits).set({ overdraftBalance: newOd, updatedAt: new Date().toISOString() })
+        .where(eq(userCredits.userId, target.userId)).run();
+      return newOd;
+    }
+    return 0;
+  }
+  listCreditLedger(filters: { userId?: number; projectId?: number; limit?: number } = {}): CreditLedger[] {
+    const conds: any[] = [];
+    if (filters.userId !== undefined) conds.push(eq(creditLedger.userId, filters.userId));
+    if (filters.projectId !== undefined) conds.push(eq(creditLedger.projectId, filters.projectId));
+    const q = conds.length
+      ? db.select().from(creditLedger).where(and(...conds))
+      : db.select().from(creditLedger);
+    return q.orderBy(desc(creditLedger.createdAt)).limit(filters.limit || 50).all();
+  }
+
+  // --- System credit queue ---
+  createQueuedAction(data: InsertSystemCreditQueue): SystemCreditQueue {
+    return db.insert(systemCreditQueue).values({
+      ...data,
+      requestedAt: data.requestedAt || new Date().toISOString(),
+    }).returning().get();
+  }
+  listSystemQueue(status?: string): SystemCreditQueue[] {
+    const q = status
+      ? db.select().from(systemCreditQueue).where(eq(systemCreditQueue.status, status))
+      : db.select().from(systemCreditQueue);
+    return q.orderBy(desc(systemCreditQueue.requestedAt)).all();
+  }
+  approveQueuedAction(queueId: number, adminId: number): SystemCreditQueue | undefined {
+    db.update(systemCreditQueue).set({
+      status: "approved", approvedBy: adminId, approvedAt: new Date().toISOString(),
+    }).where(eq(systemCreditQueue.id, queueId)).run();
+    const row = db.select().from(systemCreditQueue).where(eq(systemCreditQueue.id, queueId)).get();
+    if (!row) return undefined;
+    // Apply approved amount as overdraft on the project (within ceiling).
+    if (row.projectId && row.projectId > 0) {
+      const pc = this.ensureProjectCreditsRow(row.projectId);
+      const ceiling = pc.overdraftCeiling || 500;
+      const grant = Math.min(row.estimatedCredits, Math.max(0, ceiling - pc.overdraftBalance));
+      if (grant > 0) {
+        this.settleOverdraft({ projectId: row.projectId }, grant);
+        db.insert(creditLedger).values({
+          projectId: row.projectId, userId: row.userId, txnType: "debit", amount: -grant,
+          balanceAfter: pc.balance,
+          actionRef: `queue:${row.id}`, stripeChargeId: null,
+          note: "approved overdraft grant",
+          createdAt: new Date().toISOString(),
+        }).run();
+      }
+    }
+    return row;
+  }
+  denyQueuedAction(queueId: number, adminId: number, note?: string): SystemCreditQueue | undefined {
+    db.update(systemCreditQueue).set({
+      status: "denied", approvedBy: adminId, approvedAt: new Date().toISOString(),
+      resultRef: note || null,
+    }).where(eq(systemCreditQueue.id, queueId)).run();
+    return db.select().from(systemCreditQueue).where(eq(systemCreditQueue.id, queueId)).get();
+  }
+
+  // --- Credit packages ---
+  listCreditPackages(): CreditPackage[] {
+    return db.select().from(creditPackages).where(eq(creditPackages.active, true)).orderBy(creditPackages.sortOrder).all();
+  }
+  getCreditPackageBySlug(slug: string): CreditPackage | undefined {
+    return db.select().from(creditPackages).where(eq(creditPackages.slug, slug)).get();
+  }
+
+  // --- Auth profiles (rotation pool) ---
+  listAuthProfiles(provider?: string): AuthProfile[] {
+    const q = provider
+      ? db.select().from(authProfiles).where(eq(authProfiles.provider, provider))
+      : db.select().from(authProfiles);
+    return q.orderBy(authProfiles.lastUsedAt).all();
+  }
+  pickAuthProfile(provider: string): AuthProfile | undefined {
+    // Round-robin among status=active with remaining quota (lastUsedAt nulls-first via ORDER BY).
+    const rows = db.select().from(authProfiles)
+      .where(and(eq(authProfiles.provider, provider), eq(authProfiles.status, "active")))
+      .orderBy(authProfiles.lastUsedAt)
+      .all();
+    for (const r of rows) {
+      if (r.dailyQuota === 0 || r.dailyUsed < r.dailyQuota) return r;
+    }
+    return undefined;
+  }
+  incrementProfileUsage(profileId: number): void {
+    const row = db.select().from(authProfiles).where(eq(authProfiles.id, profileId)).get();
+    if (!row) return;
+    db.update(authProfiles).set({
+      dailyUsed: (row.dailyUsed || 0) + 1,
+      lastUsedAt: new Date().toISOString(),
+    }).where(eq(authProfiles.id, profileId)).run();
+  }
+
+  // --- Project messages voice helper ---
+  transcribeAndStoreVoice(messageId: number, transcript: string): void {
+    db.update(projectMessages).set({ transcript }).where(eq(projectMessages.id, messageId)).run();
+  }
+
+  // Update content of an existing project message (used by chat_reply approval flow)
+  updateProjectMessageContent(messageId: number, content: string): void {
+    db.update(projectMessages).set({ content, isAck: false }).where(eq(projectMessages.id, messageId)).run();
   }
 }
 

@@ -881,6 +881,37 @@ export async function sendApprovalCard(
 }
 
 /**
+ * Send a chat-reply approval card (Part IX) to the project owner.
+ * Reuses pending_actions table but bypasses the managed-session linkage.
+ */
+export async function sendChatReplyApprovalCard(
+  ownerId: number,
+  projectName: string,
+  userQuestion: string,
+  draftReply: string,
+  actionId: number,
+): Promise<void> {
+  const route = await chatIdForUser(ownerId);
+  if (!route) {
+    console.log(`[telegram] sendChatReplyApprovalCard: user ${ownerId} not linked — skipping.`);
+    return;
+  }
+  const text =
+    `🤖 <b>Johnny wants to reply in ${projectName}</b>\n` +
+    `Question: <i>${userQuestion.slice(0, 200).replace(/</g, "&lt;").replace(/>/g, "&gt;")}</i>\n\n` +
+    `Draft reply:\n<pre>${draftReply.slice(0, 800).replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`;
+  await sendTelegramMessage(route.token, route.chatId, text, {
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "✅ Approve", callback_data: `tendit:approve:${actionId}` },
+        { text: "❌ Reject", callback_data: `tendit:reject:${actionId}` },
+      ]],
+    },
+  });
+}
+
+/**
  * Answer a Telegram callback_query so the loading spinner stops.
  */
 async function answerCallback(token: string, callbackQueryId: string, text?: string): Promise<void> {
@@ -940,6 +971,66 @@ export async function handleApprovalCallback(bot: TelegramBot, callbackQuery: an
     await answerCallback(token, callbackQuery.id, "Action not found");
     return;
   }
+
+  // ── Part IX: chat_reply approvals (no managed session) ─────────────────────
+  if (action.actionType === "chat_reply") {
+    if (action.status !== "pending") {
+      await answerCallback(token, callbackQuery.id, `Already ${action.status}`);
+      return;
+    }
+    let payload: any = {};
+    try { payload = JSON.parse(action.payload || "{}"); } catch { /* */ }
+    const projectId: number | undefined = payload.projectId;
+    const ackMessageId: number | undefined = payload.ackMessageId;
+    const replyText: string = payload.replyText || "";
+    // Authorize: approver must be project owner or admin
+    let authorized = false;
+    if (approverId && projectId) {
+      const project = storage.getProject(projectId);
+      const approverUser = await storage.getUser(approverId);
+      authorized = !!project && (project.ownerId === approverId || (approverUser as any)?.role === "admin");
+    }
+    if (!authorized) {
+      await answerCallback(token, callbackQuery.id, "You can't decide this action");
+      return;
+    }
+    if (verb === "reject") {
+      storage.updatePendingActionStatus(actionId, "rejected");
+      storage.createActionApproval({ actionId, approverId: approverId!, decision: "reject", editedPayload: null, decisionNote: null });
+      storage.recordAuditEvent({ actionId, event: "rejected", beforeStateHash: null, afterStateHash: null, runtimeResponse: null });
+      // Update ack message to a rejection notice (don't expose the AI reply)
+      if (ackMessageId) {
+        try {
+          (storage as any).updateProjectMessageContent?.(ackMessageId, "Sorry, I can't help with that.");
+        } catch { /* */ }
+      }
+      await answerCallback(token, callbackQuery.id, "Rejected");
+      if (messageId) await editCardWithResult(token, chatId, messageId, "❌ Rejected");
+      return;
+    }
+    if (verb === "approve") {
+      storage.updatePendingActionStatus(actionId, "approved");
+      storage.createActionApproval({ actionId, approverId: approverId!, decision: "approve", editedPayload: null, decisionNote: null });
+      storage.recordAuditEvent({ actionId, event: "approved", beforeStateHash: null, afterStateHash: null, runtimeResponse: null });
+      // Replace ack with real reply
+      if (ackMessageId && projectId) {
+        try {
+          (storage as any).updateProjectMessageContent?.(ackMessageId, replyText);
+        } catch { /* */ }
+      } else if (projectId) {
+        storage.createProjectMessage({
+          projectId, userId: null, role: "assistant", content: replyText, source: "ai",
+        } as any);
+      }
+      storage.updatePendingActionStatus(actionId, "executed");
+      storage.recordAuditEvent({ actionId, event: "executed", beforeStateHash: null, afterStateHash: null, runtimeResponse: null });
+      await answerCallback(token, callbackQuery.id, "Approved");
+      if (messageId) await editCardWithResult(token, chatId, messageId, "✅ Approved & posted");
+      return;
+    }
+    return;
+  }
+
   const session = storage.getManagedSession(action.sessionId);
   if (!session) {
     await answerCallback(token, callbackQuery.id, "Session not found");

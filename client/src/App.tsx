@@ -34,6 +34,10 @@ import ProjectsListPage from "@/pages/projects-list";
 import ProjectDetailPage from "@/pages/project-detail";
 import ProviderSessionsPage from "@/pages/provider-sessions";
 import InviteAcceptPage from "@/pages/invite-accept";
+import AgentsPage from "@/pages/agents";
+import CreditsPage from "@/pages/credits";
+import SystemQueuePage from "@/pages/system-queue";
+import ApprovalsPage from "@/pages/approvals";
 import { NotificationBell } from "@/components/notification-bell";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -61,6 +65,10 @@ function AppRouter() {
       <Route path="/projects" component={ProjectsListPage} />
       <Route path="/projects/:id" component={ProjectDetailPage} />
       <Route path="/provider-sessions" component={ProviderSessionsPage} />
+      <Route path="/agents" component={AgentsPage} />
+      <Route path="/credits" component={CreditsPage} />
+      <Route path="/system-queue" component={SystemQueuePage} />
+      <Route path="/approvals" component={ApprovalsPage} />
       <Route component={NotFound} />
     </Switch>
   );

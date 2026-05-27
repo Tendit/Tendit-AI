@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -23,6 +23,8 @@ const navItemKeys = [
   { titleKey: "nav.providerSessions", url: "/provider-sessions", icon: Globe },
   { titleKey: "nav.apiKeys", url: "/keys", icon: Key },
   { titleKey: "nav.billing", url: "/billing", icon: CreditCard },
+  { titleKey: "nav.credits", url: "/credits", icon: Wallet },
+  { titleKey: "nav.approvals", url: "/approvals", icon: Inbox },
   { titleKey: "nav.schedule", url: "/schedule", icon: Clock },
 ];
 
@@ -40,6 +42,8 @@ const adminItemKeys = [
   { titleKey: "admin.icoDashboard", url: "/admin/ico", icon: Coins },
   { titleKey: "admin.deployment", url: "/admin/deploy", icon: Rocket },
   { titleKey: "admin.agents", url: "/admin/agents", icon: Bot },
+  { titleKey: "admin.p9Agents", url: "/agents", icon: Bot },
+  { titleKey: "admin.systemQueue", url: "/system-queue", icon: Inbox },
 ];
 
 export function AppSidebar() {

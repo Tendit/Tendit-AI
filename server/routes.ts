@@ -8,8 +8,11 @@ import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules }
 import { captureUserEvent, buildUserStoryArc, buildStoryArcContextForChat } from "./story-arc";
 import { runAgentLoop } from "./agent-orchestrator";
 import { handleTelegramUpdate, notifyOwnerFromWeb, setCallProvider, initTelegramBots, setTelegramWebhook, getTelegramBotInfo, sendTelegramMessage, sendApprovalCard } from "./telegram";
-import { webSearch, fetchPage } from "./web-tools";
+import { webSearch, fetchPage, transcribeAudio } from "./web-tools";
 import { getRuntime } from "./runtime";
+import { uploadAudio } from "./r2-storage";
+import { getStripe, getWebhookSecret } from "./stripe-client";
+import express from "express";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import multer from "multer";
@@ -3130,10 +3133,18 @@ export async function registerRoutes(
         }
       }
 
-      // Check for @johnny mention — trigger AI reply
+      // Check for @johnny mention — generate AI reply, then send to project owner for approval (Part IX)
       const johnnySays = /@johnny/i.test(content);
       if (johnnySays) {
-        // Fire AI reply asynchronously so we can return the user message immediately
+        // Insert an immediate ack placeholder so the chat UI shows activity right away.
+        const ack = storage.createProjectMessage({
+          projectId,
+          userId: null,
+          role: "assistant",
+          content: "Johnny is thinking…",
+          source: "ai",
+          isAck: true,
+        } as any);
         (async () => {
           try {
             const project = storage.getProject(projectId);
@@ -3143,30 +3154,63 @@ export async function registerRoutes(
 
             const memberNames = members.map(m => `${m.user?.username || `user#${m.userId}`} (${m.role})`).join(", ");
             const assignmentSummary = activeAssignments.slice(0, 10)
-              .map(a => `- ${a.title} (assigned to user#${a.assignedTo}, due: ${a.dueAt || a.nextRunAt || "not set"})`) 
+              .map(a => `- ${a.title} (assigned to user#${a.assignedTo}, due: ${a.dueAt || a.nextRunAt || "not set"})`)
               .join("\n");
             const recentChat = recentMessages.slice(-10)
               .map(m => `[${m.role}${m.userId ? `#${m.userId}` : ""}]: ${m.content}`)
               .join("\n");
 
-            const systemPrompt = `You are Johnny, an AI project assistant helping with project "${project?.name || "Unknown Project"}".\n\nProject members: ${memberNames}\n\nActive assignments:\n${assignmentSummary || "None"}\n\nRecent chat:\n${recentChat}\n\nRespond helpfully and concisely. Focus on the project context.`;
+            // Resolve the agent for chat_reply capability on this project (falls back to Johnny default)
+            const agent = storage.resolveAgent(projectId, "chat_reply");
+            const systemPrompt = (agent?.systemPrompt && agent.systemPrompt.length > 0)
+              ? agent.systemPrompt + `\n\nProject: "${project?.name || "Unknown"}".\nMembers: ${memberNames}\nActive assignments:\n${assignmentSummary || "None"}\nRecent chat:\n${recentChat}`
+              : `You are Johnny, an AI project assistant helping with project "${project?.name || "Unknown Project"}".\n\nProject members: ${memberNames}\n\nActive assignments:\n${assignmentSummary || "None"}\n\nRecent chat:\n${recentChat}\n\nRespond helpfully and concisely. Focus on the project context.`;
 
-            const aiResult = await callProvider("perplexity", "sonar", [
+            const provider = agent?.provider || "perplexity";
+            const model = agent?.model || "sonar";
+            const aiResult = await callProvider(provider, model, [
               { role: "system", content: systemPrompt },
               { role: "user", content },
             ]);
 
-            if (aiResult.content) {
-              storage.createProjectMessage({
-                projectId,
-                userId: null,
-                role: "assistant",
-                content: aiResult.content,
-                source: "ai",
-              });
+            const draft = aiResult.content || "";
+            if (!draft) {
+              storage.updateProjectMessageContent(ack.id, "(no reply generated)");
+              return;
             }
-          } catch (aiErr) {
-            console.error("[Project AI] Error generating Johnny reply:", aiErr);
+
+            // Approval gate: create a pending_action and ping project owner via Telegram.
+            const ownerId = project?.ownerId || userId;
+            const action = storage.createPendingAction({
+              sessionId: 0,
+              actionType: "chat_reply",
+              payload: JSON.stringify({ projectId, ackMessageId: ack.id, replyText: draft, askedBy: userId }),
+              reasoning: `Reply to @johnny mention in project ${project?.name || projectId}`,
+              pageStateHash: null,
+              screenshotUrl: null,
+              status: "pending",
+              createdBy: "johnny",
+              expiresAt: null,
+            } as any);
+            try {
+              const { sendChatReplyApprovalCard } = await import("./telegram");
+              await sendChatReplyApprovalCard(ownerId, project?.name || `Project #${projectId}`, content, draft, action.id);
+            } catch (te: any) {
+              console.error("[Project AI] Telegram card error:", te?.message);
+            }
+            // Also notify the owner in-app
+            storage.createNotification({
+              userId: ownerId,
+              type: "chat_reply_approval",
+              title: `Johnny drafted a reply in ${project?.name || "a project"}`,
+              body: draft.slice(0, 160),
+              link: `#/approvals`,
+              projectId,
+              read: false,
+            });
+          } catch (aiErr: any) {
+            console.error("[Project AI] Error generating Johnny reply:", aiErr?.message || aiErr);
+            try { storage.updateProjectMessageContent(ack.id, "(error generating reply)"); } catch { /* */ }
           }
         })();
       }
@@ -3456,6 +3500,392 @@ export async function registerRoutes(
       });
       return res.json({ status: "rejected" });
     } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // =====================================================
+  // PART IX — Multi-Project Operations
+  // (agents, milestones, credits, system queue, voice, billing)
+  // =====================================================
+
+  async function adminOnly(req: Request, res: Response): Promise<boolean> {
+    const userId = (req as any).userId;
+    const user = (await storage.getUser(userId)) as any;
+    if (user?.role !== "admin") {
+      res.status(403).json({ message: "Admin only" });
+      return false;
+    }
+    return true;
+  }
+
+  // --- Agents (admin) ---
+
+  app.get("/api/agents", authMiddleware, async (req, res) => {
+    try {
+      const user = (await storage.getUser((req as any).userId)) as any;
+      if (user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
+      return res.json(storage.listP9Agents());
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/agents", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const { name, slug, provider, model, capabilities, systemPrompt, status } = req.body || {};
+      if (!name || !slug || !provider || !model) {
+        return res.status(400).json({ message: "name, slug, provider, model required" });
+      }
+      const agent = storage.createP9Agent({
+        name, slug, provider, model,
+        capabilities: Array.isArray(capabilities) ? JSON.stringify(capabilities) : (capabilities || "[]"),
+        systemPrompt: systemPrompt || "",
+        status: status || "active",
+      });
+      return res.status(201).json(agent);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.patch("/api/agents/:id", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const id = parseInt(req.params.id);
+      const patch = { ...req.body };
+      if (Array.isArray(patch.capabilities)) patch.capabilities = JSON.stringify(patch.capabilities);
+      const updated = storage.updateP9Agent(id, patch);
+      return res.json(updated);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.get("/api/agent-assignments", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const projectId = req.query.projectId ? parseInt(req.query.projectId as string) : undefined;
+      const capability = req.query.capability as string | undefined;
+      return res.json(storage.listAgentAssignments({ projectId, capability }));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/agent-assignments", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const { agentId, projectId, capability, priority } = req.body || {};
+      if (!agentId || !capability) {
+        return res.status(400).json({ message: "agentId and capability required" });
+      }
+      const row = storage.createAgentAssignment({
+        agentId, projectId: projectId ?? null, capability,
+        priority: priority ?? 100,
+      });
+      return res.status(201).json(row);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.delete("/api/agent-assignments/:id", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      storage.deleteAgentAssignment(parseInt(req.params.id));
+      return res.json({ ok: true });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // --- Milestones ---
+
+  app.get("/api/projects/:id/milestones", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = (await storage.getUser(userId)) as any;
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      return res.json(storage.listProjectMilestones(projectId));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/projects/:id/milestones", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = (await storage.getUser(userId)) as any;
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      const { name, description, dueDate, status, agentAssignmentId, dependsOn } = req.body || {};
+      if (!name) return res.status(400).json({ message: "name required" });
+      const m = storage.createMilestone({
+        projectId, name, description: description ?? null, dueDate: dueDate ?? null,
+        status: status || (Array.isArray(dependsOn) && dependsOn.length > 0 ? "locked" : "ready"),
+        agentAssignmentId: agentAssignmentId ?? null,
+      });
+      if (Array.isArray(dependsOn)) {
+        for (const dep of dependsOn) {
+          try { storage.addMilestoneDep(m.id, parseInt(dep)); } catch { /* ignore bad deps */ }
+        }
+      }
+      return res.status(201).json(m);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.patch("/api/milestones/:id", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id);
+      const m = storage.getMilestone(id);
+      if (!m) return res.status(404).json({ message: "Not found" });
+      const user = (await storage.getUser(userId)) as any;
+      if (user?.role !== "admin" && !storage.isUserInProject(m.projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      const { status, name, description, dueDate, agentAssignmentId } = req.body || {};
+      if (status) {
+        storage.updateMilestoneStatus(id, status, status === "done" ? userId : undefined);
+      }
+      const patch: any = {};
+      if (name !== undefined) patch.name = name;
+      if (description !== undefined) patch.description = description;
+      if (dueDate !== undefined) patch.dueDate = dueDate;
+      if (agentAssignmentId !== undefined) patch.agentAssignmentId = agentAssignmentId;
+      if (Object.keys(patch).length > 0) storage.updateMilestone(id, patch);
+      return res.json(storage.getMilestone(id));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.get("/api/milestones/:id/deps", authMiddleware, async (req, res) => {
+    try {
+      return res.json(storage.getMilestoneDeps(parseInt(req.params.id)));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/milestones/:id/deps", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const id = parseInt(req.params.id);
+      const m = storage.getMilestone(id);
+      if (!m) return res.status(404).json({ message: "Not found" });
+      const user = (await storage.getUser(userId)) as any;
+      if (user?.role !== "admin" && !storage.isUserInProject(m.projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      const { dependsOnMilestoneId } = req.body || {};
+      if (!dependsOnMilestoneId) return res.status(400).json({ message: "dependsOnMilestoneId required" });
+      const row = storage.addMilestoneDep(id, parseInt(dependsOnMilestoneId));
+      return res.status(201).json(row);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.delete("/api/milestone-deps/:id", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      storage.removeMilestoneDep(parseInt(req.params.id));
+      return res.json({ ok: true });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // --- Credits ---
+
+  app.get("/api/credits/me", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      return res.json(storage.getUserCredits(userId));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.get("/api/projects/:id/credits", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = (await storage.getUser(userId)) as any;
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      return res.json(storage.getProjectCredits(projectId));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/credits/grant", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const { userId, projectId, amount, note } = req.body || {};
+      if (!userId || !amount) return res.status(400).json({ message: "userId and amount required" });
+      const result = storage.creditCredits({
+        userId: parseInt(userId), projectId: projectId ? parseInt(projectId) : null,
+        amount: parseInt(amount), txnType: "credit", note: note || "admin grant",
+      });
+      return res.json(result);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.get("/api/credits/ledger", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = (await storage.getUser(userId)) as any;
+      const projectId = req.query.projectId ? parseInt(req.query.projectId as string) : undefined;
+      const targetUserId = req.query.userId ? parseInt(req.query.userId as string) : undefined;
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
+      // Non-admins can only see their own ledger
+      if (user?.role !== "admin") {
+        return res.json(storage.listCreditLedger({ userId, limit }));
+      }
+      return res.json(storage.listCreditLedger({ userId: targetUserId, projectId, limit }));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // Public: credit packages list
+  app.get("/api/credits/packages", async (req, res) => {
+    try {
+      return res.json(storage.listCreditPackages());
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // --- System credit queue (admin) ---
+
+  app.get("/api/system-queue", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const status = req.query.status as string | undefined;
+      return res.json(storage.listSystemQueue(status));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/system-queue/:id/approve", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const adminId = (req as any).userId;
+      const row = storage.approveQueuedAction(parseInt(req.params.id), adminId);
+      return res.json(row);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/system-queue/:id/deny", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      const adminId = (req as any).userId;
+      const { note } = req.body || {};
+      const row = storage.denyQueuedAction(parseInt(req.params.id), adminId, note);
+      return res.json(row);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // --- Voice upload (project chat) ---
+
+  app.post("/api/projects/:id/voice", authMiddleware, upload.single("audio"), async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = (await storage.getUser(userId)) as any;
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      const f = (req as any).file;
+      if (!f) return res.status(400).json({ message: "audio file required" });
+      const buffer: Buffer = f.buffer || (f.path ? require("fs").readFileSync(f.path) : null);
+      if (!buffer) return res.status(400).json({ message: "could not read audio" });
+      const mimeType = f.mimetype || "audio/webm";
+      const ext = (mimeType.split("/")[1] || "webm").split(";")[0];
+      const key = `voice/${projectId}/${Date.now()}_${userId}.${ext}`;
+      const uploaded = await uploadAudio(buffer, key, mimeType);
+
+      let transcript = "";
+      let durationSec = 0;
+      try {
+        const tr = await transcribeAudio(buffer, mimeType);
+        transcript = tr.text;
+        durationSec = Math.round(tr.durationSec || 0);
+      } catch (e: any) {
+        console.error("[voice] transcription failed:", e?.message);
+      }
+
+      const msg = storage.createProjectMessage({
+        projectId, userId, role: "user",
+        content: transcript || "[voice message]",
+        audioUrl: uploaded.url,
+        transcript: transcript || null,
+        durationSec: durationSec || null,
+        source: "web",
+      } as any);
+      return res.status(201).json(msg);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // --- Billing / Stripe ---
+
+  app.post("/api/billing/checkout", authMiddleware, async (req, res) => {
+    try {
+      const stripe = getStripe();
+      if (!stripe) return res.status(503).json({ message: "Stripe not configured" });
+      const userId = (req as any).userId;
+      const { packageSlug, projectId, successUrl, cancelUrl } = req.body || {};
+      if (!packageSlug) return res.status(400).json({ message: "packageSlug required" });
+      const pkg = storage.getCreditPackageBySlug(packageSlug);
+      if (!pkg) return res.status(404).json({ message: "package not found" });
+      const user = (await storage.getUser(userId)) as any;
+      const lineItem: any = pkg.stripePriceId
+        ? { price: pkg.stripePriceId, quantity: 1 }
+        : {
+            price_data: {
+              currency: "usd",
+              product_data: { name: pkg.name },
+              unit_amount: pkg.priceUsd,
+            },
+            quantity: 1,
+          };
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        line_items: [lineItem],
+        success_url: successUrl || `${req.headers.origin || ""}/#/credits?status=success`,
+        cancel_url: cancelUrl || `${req.headers.origin || ""}/#/credits?status=cancel`,
+        customer_email: user?.email,
+        metadata: {
+          userId: String(userId),
+          projectId: projectId ? String(projectId) : "",
+          packageSlug,
+          credits: String(pkg.credits),
+        },
+      });
+      return res.json({ url: session.url, sessionId: session.id });
+    } catch (e: any) {
+      console.error("[billing/checkout] error:", e?.message);
+      return res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Stripe webhook — note: global JSON parser will have already consumed body,
+  // so we use a re-encoded raw body fallback. For production correctness, mount
+  // raw at the very top of server/index.ts. Here we tolerate both shapes.
+  app.post("/api/billing/webhook", async (req: any, res) => {
+    try {
+      const stripe = getStripe();
+      const secret = getWebhookSecret();
+      if (!stripe || !secret) return res.status(503).json({ message: "Stripe not configured" });
+      const sig = req.headers["stripe-signature"] as string;
+      let event: any;
+      try {
+        const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
+        event = stripe.webhooks.constructEvent(raw, sig, secret);
+      } catch (err: any) {
+        return res.status(400).json({ message: `Webhook signature verification failed: ${err?.message}` });
+      }
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object as any;
+        const metadata = session.metadata || {};
+        const userId = parseInt(metadata.userId || "0");
+        const projectId = metadata.projectId ? parseInt(metadata.projectId) : null;
+        const credits = parseInt(metadata.credits || "0");
+        if (userId && credits > 0) {
+          const result = storage.creditCredits({
+            userId, projectId, amount: credits,
+            txnType: "credit", stripeChargeId: session.payment_intent || session.id,
+            note: `Stripe purchase: ${metadata.packageSlug || "package"}`,
+          });
+          console.log(`[stripe webhook] credited user ${userId} ${credits} credits; settled ${result.settled} overdraft`);
+        }
+      }
+      return res.json({ received: true });
+    } catch (e: any) {
+      console.error("[stripe webhook] error:", e?.message);
       return res.status(500).json({ message: e.message });
     }
   });

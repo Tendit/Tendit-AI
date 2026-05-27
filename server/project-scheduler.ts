@@ -239,7 +239,38 @@ async function runScheduler(): Promise<void> {
   } catch (e: any) {
     console.error("[project-scheduler] listPendingActionsNeedingReminder error:", e.message);
   }
+
+  // Part IX: milestone dependency unlocker (every 5th tick ~ 5 min)
+  schedulerTickCount++;
+  if (schedulerTickCount % 5 === 0) {
+    try {
+      const ready = storage.getMilestonesReadyToUnlock();
+      for (const m of ready) {
+        try {
+          storage.updateMilestoneStatus(m.id, "ready");
+          const project = storage.getProject(m.projectId);
+          if (project?.ownerId) {
+            storage.createNotification({
+              userId: project.ownerId,
+              type: "milestone_ready",
+              title: `Milestone ready: ${m.name}`,
+              body: m.description?.slice(0, 200) || "All dependencies completed.",
+              link: `#/projects/${m.projectId}`,
+              projectId: m.projectId,
+              read: false,
+            });
+          }
+        } catch (e: any) {
+          console.error(`[project-scheduler] milestone ${m.id} unlock error:`, e.message);
+        }
+      }
+    } catch (e: any) {
+      console.error("[project-scheduler] getMilestonesReadyToUnlock error:", e.message);
+    }
+  }
 }
+
+let schedulerTickCount = 0;
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 

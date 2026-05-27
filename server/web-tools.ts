@@ -155,3 +155,98 @@ export async function fetchPage(url: string): Promise<FetchPageResult> {
 
   return { url, title, text, status, truncated };
 }
+
+// =====================================================
+// Voice transcription (Part IX)
+// T1: Groq Whisper Large v3 → T2: OpenAI Whisper-1
+// =====================================================
+
+export interface TranscribeResult {
+  text: string;
+  durationSec: number;
+  provider: "groq" | "openai";
+}
+
+import { storage as _storage } from "./storage";
+
+async function transcribeViaGroq(buffer: Buffer, mimeType: string): Promise<TranscribeResult> {
+  const profile = _storage.pickAuthProfile("groq");
+  // Auth profile is a label-only rotation cue; the actual key still comes from env.
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error("GROQ_API_KEY not configured");
+
+  const form = new FormData();
+  const blob = new Blob([buffer], { type: mimeType || "audio/webm" });
+  form.append("file", blob, "audio.webm");
+  form.append("model", "whisper-large-v3");
+  form.append("response_format", "verbose_json");
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw Object.assign(new Error(`Groq Whisper ${res.status}: ${txt}`), { status: res.status });
+  }
+  const data: any = await res.json();
+  if (profile) _storage.incrementProfileUsage(profile.id);
+  return {
+    text: String(data?.text || ""),
+    durationSec: Number(data?.duration || 0),
+    provider: "groq",
+  };
+}
+
+async function transcribeViaOpenAI(buffer: Buffer, mimeType: string): Promise<TranscribeResult> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error("OPENAI_API_KEY not configured");
+
+  const form = new FormData();
+  const blob = new Blob([buffer], { type: mimeType || "audio/webm" });
+  form.append("file", blob, "audio.webm");
+  form.append("model", "whisper-1");
+  form.append("response_format", "verbose_json");
+
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw Object.assign(new Error(`OpenAI Whisper ${res.status}: ${txt}`), { status: res.status });
+  }
+  const data: any = await res.json();
+  return {
+    text: String(data?.text || ""),
+    durationSec: Number(data?.duration || 0),
+    provider: "openai",
+  };
+}
+
+/**
+ * Transcribe an audio buffer using a tiered provider ladder.
+ * T1 Groq Whisper → T2 OpenAI Whisper. Throws if both fail.
+ */
+export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<TranscribeResult> {
+  // Try Groq first if key is set
+  if (process.env.GROQ_API_KEY) {
+    try {
+      return await transcribeViaGroq(buffer, mimeType);
+    } catch (e: any) {
+      const code = e?.status || 0;
+      // Fall through to OpenAI on rate limit / server error / missing key
+      if (code !== 429 && (code < 500 || code >= 600)) {
+        // Other errors — only fall through if we have OpenAI key
+        if (!process.env.OPENAI_API_KEY) throw e;
+      }
+      console.warn("[transcribeAudio] Groq failed, falling back to OpenAI:", e?.message);
+    }
+  }
+  if (process.env.OPENAI_API_KEY) {
+    return await transcribeViaOpenAI(buffer, mimeType);
+  }
+  throw new Error("No transcription provider configured (set GROQ_API_KEY or OPENAI_API_KEY)");
+}

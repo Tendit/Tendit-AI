@@ -1064,6 +1064,11 @@ export const projectMessages = sqliteTable("project_messages", {
   attachments: text("attachments"), // JSON array of {name, url}
   source: text("source").notNull().default("web"), // web, telegram, ai
   telegramMessageId: text("telegram_message_id"),
+  // Part IX voice + ack extensions
+  audioUrl: text("audio_url"),
+  transcript: text("transcript"),
+  durationSec: integer("duration_sec"),
+  isAck: integer("is_ack", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(new Date().toISOString()),
 });
 export type ProjectMessage = typeof projectMessages.$inferSelect;
@@ -1166,3 +1171,148 @@ export const actionAuditLog = sqliteTable("action_audit_log", {
 export type ActionAuditLog = typeof actionAuditLog.$inferSelect;
 export const insertActionAuditLogSchema = createInsertSchema(actionAuditLog).omit({ id: true, eventAt: true });
 export type InsertActionAuditLog = z.infer<typeof insertActionAuditLogSchema>;
+
+// =====================================================
+// PART IX — MULTI-PROJECT OPERATIONS LAYER
+// (agents/assignments, milestones, credits ledger, packages, system queue, auth profiles)
+// Note: existing tables `platform_agents` and `agent_assignments` predate this; here we
+// add Part IX's own `agents` and `p9_agent_assignments` to avoid SQL table name collision.
+// =====================================================
+
+export const agents = sqliteTable("agents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  provider: text("provider").notNull(), // groq|openai|anthropic|sonar|ollama|local
+  model: text("model").notNull(),
+  capabilities: text("capabilities").notNull().default("[]"), // JSON array
+  systemPrompt: text("system_prompt").notNull().default(""),
+  status: text("status").notNull().default("active"), // active|paused
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type Agent = typeof agents.$inferSelect;
+export const insertAgentSchema = createInsertSchema(agents).omit({ id: true, createdAt: true });
+export type InsertAgent = z.infer<typeof insertAgentSchema>;
+
+export const p9AgentAssignments = sqliteTable("p9_agent_assignments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  agentId: integer("agent_id").notNull(),
+  projectId: integer("project_id"), // nullable: null = global default
+  capability: text("capability").notNull(), // chat_reply | financial_modeling | exam_grading | ...
+  priority: integer("priority").notNull().default(100),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type P9AgentAssignment = typeof p9AgentAssignments.$inferSelect;
+export const insertP9AgentAssignmentSchema = createInsertSchema(p9AgentAssignments).omit({ id: true, createdAt: true });
+export type InsertP9AgentAssignment = z.infer<typeof insertP9AgentAssignmentSchema>;
+
+export const milestones = sqliteTable("milestones", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description"),
+  dueDate: text("due_date"), // ISO date
+  status: text("status").notNull().default("locked"), // locked|ready|in_progress|done|skipped
+  agentAssignmentId: integer("agent_assignment_id"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  completedAt: text("completed_at"),
+  completedBy: integer("completed_by"),
+});
+export type Milestone = typeof milestones.$inferSelect;
+export const insertMilestoneSchema = createInsertSchema(milestones).omit({ id: true, createdAt: true, completedAt: true, completedBy: true });
+export type InsertMilestone = z.infer<typeof insertMilestoneSchema>;
+
+export const milestoneDeps = sqliteTable("milestone_deps", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  milestoneId: integer("milestone_id").notNull(),
+  dependsOnMilestoneId: integer("depends_on_milestone_id").notNull(),
+});
+export type MilestoneDep = typeof milestoneDeps.$inferSelect;
+export const insertMilestoneDepSchema = createInsertSchema(milestoneDeps).omit({ id: true });
+export type InsertMilestoneDep = z.infer<typeof insertMilestoneDepSchema>;
+
+export const userCredits = sqliteTable("user_credits", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().unique(),
+  balance: integer("balance").notNull().default(0),
+  overdraftBalance: integer("overdraft_balance").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+export type UserCredits = typeof userCredits.$inferSelect;
+export const insertUserCreditsSchema = createInsertSchema(userCredits).omit({ id: true, updatedAt: true });
+export type InsertUserCredits = z.infer<typeof insertUserCreditsSchema>;
+
+export const projectCredits = sqliteTable("project_credits", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull().unique(),
+  balance: integer("balance").notNull().default(0),
+  overdraftBalance: integer("overdraft_balance").notNull().default(0),
+  overdraftCeiling: integer("overdraft_ceiling").notNull().default(500),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+export type ProjectCredits = typeof projectCredits.$inferSelect;
+export const insertProjectCreditsSchema = createInsertSchema(projectCredits).omit({ id: true, updatedAt: true });
+export type InsertProjectCredits = z.infer<typeof insertProjectCreditsSchema>;
+
+export const creditLedger = sqliteTable("credit_ledger", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id"),
+  userId: integer("user_id").notNull(),
+  txnType: text("txn_type").notNull(), // debit|credit|overdraft_settle|refund
+  amount: integer("amount").notNull(),
+  balanceAfter: integer("balance_after").notNull(),
+  actionRef: text("action_ref"),
+  stripeChargeId: text("stripe_charge_id"),
+  note: text("note"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type CreditLedger = typeof creditLedger.$inferSelect;
+export const insertCreditLedgerSchema = createInsertSchema(creditLedger).omit({ id: true, createdAt: true });
+export type InsertCreditLedger = z.infer<typeof insertCreditLedgerSchema>;
+
+export const creditPackages = sqliteTable("credit_packages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  credits: integer("credits").notNull(),
+  priceUsd: integer("price_usd").notNull(), // cents
+  priceIls: integer("price_ils").notNull(), // agorot
+  stripePriceId: text("stripe_price_id"),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(100),
+});
+export type CreditPackage = typeof creditPackages.$inferSelect;
+export const insertCreditPackageSchema = createInsertSchema(creditPackages).omit({ id: true });
+export type InsertCreditPackage = z.infer<typeof insertCreditPackageSchema>;
+
+export const systemCreditQueue = sqliteTable("system_credit_queue", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  userId: integer("user_id").notNull(),
+  actionPayload: text("action_payload").notNull(), // JSON
+  estimatedCredits: integer("estimated_credits").notNull().default(0),
+  requestedAt: text("requested_at").notNull().default(new Date().toISOString()),
+  status: text("status").notNull().default("awaiting"), // awaiting|approved|denied|executed
+  approvedBy: integer("approved_by"),
+  approvedAt: text("approved_at"),
+  resultRef: text("result_ref"),
+});
+export type SystemCreditQueue = typeof systemCreditQueue.$inferSelect;
+export const insertSystemCreditQueueSchema = createInsertSchema(systemCreditQueue).omit({ id: true, requestedAt: true, approvedAt: true });
+export type InsertSystemCreditQueue = z.infer<typeof insertSystemCreditQueueSchema>;
+
+export const authProfiles = sqliteTable("auth_profiles", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  provider: text("provider").notNull(), // groq|openai|anthropic|cloudflare|stripe|...
+  entity: text("entity").notNull(), // roy_personal | massive_group | a3_academy | orthocare | launchkit
+  credentialsRef: text("credentials_ref").notNull(), // label only — NEVER actual secrets
+  dailyQuota: integer("daily_quota").notNull().default(0),
+  dailyUsed: integer("daily_used").notNull().default(0),
+  quotaResetAt: text("quota_reset_at").notNull().default(new Date().toISOString()),
+  status: text("status").notNull().default("active"), // active|exhausted|disabled
+  lastUsedAt: text("last_used_at"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type AuthProfile = typeof authProfiles.$inferSelect;
+export const insertAuthProfileSchema = createInsertSchema(authProfiles).omit({ id: true, createdAt: true, lastUsedAt: true });
+export type InsertAuthProfile = z.infer<typeof insertAuthProfileSchema>;
