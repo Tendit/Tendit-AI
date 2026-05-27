@@ -547,5 +547,245 @@ Adding a new marketplace = one new adapter file + one row in
 
 ---
 
+## Part IX — Multi-Project Operations Layer
+
+Parts I–VIII built the agent runtime, the research stack, the tool
+shelves, and the approval rail for risky outbound actions. Part IX is
+the **business layer**: real projects with real members, real money, real
+milestones, and a multi-agent workforce.
+
+Five components, all interlocking, shipped as one push:
+
+1. **Project portfolio seed** — the 11 ventures preloaded
+2. **Voice in project chat** — record → transcribe → audio + transcript both kept
+3. **Chat-reply approval gate** — Johnny's replies in project chat pause for owner approval
+4. **Agent registry & switching** — multiple LLMs/models routed per project & capability
+5. **Milestones with dependencies** — "do X next month, but only if Y and Z are done"
+6. **Credits, ledger & billing** — token-based internal accounting, Stripe checkout, overdraft queue
+
+### Layer touches
+
+| Layer | What gets added |
+|---|---|
+| R0 Intent | New intent types: `project_chat_query`, `milestone_advance` |
+| R3 Decision | Credit-check gate before any paid action |
+| B1 Schema | `agents`, `agent_assignments`, `milestones`, `milestone_deps`, `user_credits`, `project_credits`, `credit_ledger`, `credit_packages`, `system_credit_queue`; extends `project_messages` with `audio_url`, `transcript`, `duration_sec` |
+| B2 Routes | Voice upload, transcription, agent registry CRUD, milestone CRUD, credit purchase, Stripe webhook, system-credit-queue approval |
+| B3 Cron | Milestone dependency resolver (daily), stale-approval reminder (every 30 min), credit-low warning (when balance < 100) |
+| B4 Agent | Johnny gains: `transcribe_audio`, `check_credits`, `consume_credits`, `route_to_agent`; new shared infrastructure for multi-agent orchestration |
+| B5 Telegram | Approval cards for chat replies (reuses Part VIII queue); credit-low DM to user |
+| B6 Frontend | Voice record button in chat, admin **Approvals** page, **Agents** page, **Milestones** tab on project detail, **Credits** page with Stripe checkout, **System Queue** (admin only) |
+| B7 Governance | Every paid action logged in `credit_ledger` with txn type, amount, before/after balance |
+
+### Component 1 — Project portfolio seed
+
+One-time migration inserts these 11 projects on first boot:
+
+| Slug | Name | Status |
+|---|---|---|
+| massive | Massive Group | active (parent) |
+| a3-academy | A3 Academy | live (a3m.pplx.app) |
+| orthocare | OrthoCare AI | active build |
+| launchkit | LaunchKit | active build |
+| tendit | Tendit AI | live (this platform) |
+| spc | SPC Pool Safety | grant-stage |
+| foraviset | Foraviset Biotech | fundraising |
+| hatala | HaTala / Lati Fridges | concept |
+| listening | AI Listening Service | concept |
+| personal-os | Personal OS / Private Phone | research |
+| ai-game | AI Game Dev | research |
+
+Idempotent: only inserts rows whose slug doesn't yet exist. User can
+edit/archive/delete in UI after.
+
+### Component 2 — Voice in project chat
+
+Flow:
+1. Member taps mic in chat tab → `MediaRecorder` captures `.webm` audio
+2. Upload to Tendit → stored on [Cloudflare R2](https://developers.cloudflare.com/r2/pricing/) ($0.015/GB/mo, free egress — essentially free at our scale)
+3. Transcribe via tiered shelf: T1 [Groq Whisper](https://console.groq.com/) (14,400 req/day per account × 5 pooled accounts ≈ unlimited) → T2 [OpenAI Whisper](https://platform.openai.com/docs/guides/speech-to-text) ($0.006/min) → T3 self-hosted whisper.cpp
+4. Both `audio_url` and `transcript` stored on the `project_messages` row — members can read or replay
+5. Johnny treats the transcript as a regular text message for response purposes
+
+Credit cost: 3 credits per minute of audio.
+
+### Component 3 — Chat-reply approval gate
+
+**Key constraint:** Johnny can still *talk* to members in chat to acknowledge
+("give me a moment, running this"), but any **content reply** — actual
+answer to the user's question — routes through admin approval first.
+
+Reuses Part VIII's `pending_actions` table with `actionType="chat_reply"`:
+
+1. Member posts message in project chat
+2. Johnny processes, drafts a reply
+3. Johnny posts an acknowledgement immediately: "On it, give me a moment." (this is a system-flagged message, no approval needed)
+4. Johnny creates `pending_action(actionType="chat_reply", payload=draftReply, projectId, sessionId=chatId)`
+5. **Project owner** (not Massive admin — the person who runs that project) sees Approval card in admin console + Telegram
+6. Owner approves → reply posts to chat as Johnny. Edit → owner's edit posts. Reject → dropped, members see a single "can't help with that" generic.
+7. All routed through the **same approval queue** built in Phase A. Zero new tables.
+
+### Component 4 — Agent registry & switching
+
+New table `agents`:
+```
+id, name, slug, provider (openai|anthropic|sonar|groq|ollama|local),
+model (e.g. "claude-sonnet-4.6"), capabilities (JSON array),
+system_prompt, status (active|paused), created_at
+```
+
+New table `agent_assignments`:
+```
+id, agent_id FK, project_id FK (nullable — null = global default),
+capability (chat_reply | financial_modeling | exam_grading | code_review | ...),
+priority (lower wins ties)
+```
+
+Resolution logic when Johnny needs an agent for capability `C` on project `P`:
+1. Look up `agent_assignments` where `project_id=P` and `capability=C` → use that agent
+2. Fallback to `project_id=NULL` row → the global default for that capability
+3. Hard fallback to Johnny on claude-sonnet
+
+This is how you route OrthoCare's chat to a medical-tuned model,
+LaunchKit's financial modeling to GPT-5, A3 Academy's exam grading to
+Groq (cost-optimal). One row in `agent_assignments`.
+
+### Component 5 — Milestones with dependencies
+
+New table `milestones`:
+```
+id, project_id FK, name, description, due_date, status (locked|ready|in_progress|done|skipped),
+agent_assignment_id FK (nullable), created_at, completed_at, completed_by
+```
+
+New table `milestone_deps`:
+```
+id, milestone_id FK (the dependent), depends_on_milestone_id FK (the prerequisite)
+```
+
+Daily B3 cron job:
+```
+for each milestone where status=locked:
+  prereqs = SELECT depends_on FROM milestone_deps WHERE milestone_id=this
+  if all prereqs have status=done:
+    set status=ready
+    notify project owner in chat + Telegram
+    if agent_assignment_id set: spawn assignment for that agent
+```
+
+Your example becomes three rows:
+```
+#1  Foraviset → "FTO Patent Filing"      → status=ready, due=2026-06-15
+#2  Foraviset → "Q3 Financial Report"    → status=ready, due=2026-06-20
+#3  Foraviset → "VC Website Launch"      → status=locked, due=2026-07-01
+          depends_on → [#1, #2]
+```
+
+Milestone #3 stays locked until both #1 and #2 flip to done. Then
+auto-flips to ready, notifies, and (if `agent_assignment_id` is set)
+kicks off the assigned agent to start work.
+
+### Component 6 — Credits, ledger & billing
+
+The accounting layer that gates everything.
+
+**Conversion table (1 credit = 1k LLM tokens equivalent):**
+
+| Action | Credits | Notes |
+|---|---|---|
+| LLM call | actual_tokens / 1000 | Rounded up to nearest credit |
+| Voice transcription | 3 × minutes | |
+| Web search | 1 | |
+| Page fetch | 1 | |
+| Managed-session action (Part VIII) | 5 | Owner approval is the gate; credits are the bill |
+| Image generation | 10 | Future Phase X |
+| Long-running agent task | sum of sub-actions | |
+
+**Balance model — project-funded:**
+
+- Massive admin (you) opens a project for a client
+- Project gets a `project_credits.balance` seeded by you (e.g. 1,000 credits trial)
+- Every member action in that project deducts from `project_credits`
+- When balance > 0: Johnny runs freely, deducts in real-time
+- When balance hits 0 mid-task: current sub-action completes, then next action queues for system approval
+
+**Personal balance (secondary):**
+
+User also has `user_credits.balance` for non-project actions (DMing Johnny
+outside any project, personal queries). Bought via Stripe like project
+credits.
+
+**Overdraft & system credit queue:**
+
+New table `system_credit_queue`:
+```
+id, project_id FK, user_id FK, action_payload JSON, estimated_credits,
+requested_at, status (awaiting | approved | denied | executed),
+approved_by (user_id of Massive admin), approved_at
+```
+
+When `project_credits.balance` hits 0:
+- New actions don't run — they insert into `system_credit_queue` with `status=awaiting`
+- Massive admin sees them in **System Queue** page (admin-only)
+- Approve → action runs, cost added to `project_credits.overdraft_balance`
+- Hard ceiling: `project.overdraft_ceiling` (default 500 credits, per-project configurable). Past ceiling → no more approvals, hard stop, user must top up.
+
+When user next buys credits via Stripe:
+- New credits land in `project_credits.balance`
+- Settlement runs first: if `overdraft_balance > 0`, deduct from new balance until overdraft is cleared
+- Remainder is usable balance
+
+**Ledger (the audit truth):**
+
+New table `credit_ledger` — immutable append-only log:
+```
+id, project_id FK (nullable), user_id FK, txn_type (debit | credit | overdraft_settle | refund),
+amount, balance_after, action_ref (nullable, points to action_audit_log or pending_action),
+stripe_charge_id (nullable), created_at
+```
+
+Every credit movement of any kind writes a row here. Source of truth for
+billing reconciliation, dispute resolution, user receipts.
+
+**Stripe integration (extends existing scaffold):**
+
+Tendit already has `stripeCustomerId` and `stripeSubscriptionId` columns
+on the users table and a billing.tsx page — scaffolded but inert (no
+`stripe` package installed, no webhook handler, no checkout route).
+Part IX finishes the wiring:
+
+1. Install [`stripe` npm package](https://www.npmjs.com/package/stripe)
+2. New table `credit_packages`: id, name, credits, price_usd, price_ils, stripe_price_id
+3. Seed packages: Starter (100 credits @ $5), Growth (500 @ $20), Pro (2,000 @ $70), Scale (10,000 @ $300)
+4. Route `POST /api/billing/checkout` — creates [Stripe Checkout Session](https://stripe.com/docs/payments/checkout), returns redirect URL
+5. Route `POST /api/billing/webhook` — [Stripe webhook](https://stripe.com/docs/webhooks) handler, on `checkout.session.completed` → credit user/project, write ledger entry, settle overdraft if any
+6. Frontend: Credits page shows current balance(s), package selector, Stripe checkout button, ledger view (last 50 txns)
+7. **"Need more than this?"** button next to packages → opens [Calendly](https://calendly.com/) for consulting call (your manual-payment funnel for big engagements)
+
+### Phasing within Part IX
+
+All one push, but ordered to minimize risk:
+
+1. **Schema migrations** (idempotent CREATE TABLE IF NOT EXISTS) — commits cleanly, no behavior change
+2. **Seed 11 projects** — inserts on next boot, idempotent by slug
+3. **Agent registry** — inserts default "Johnny" agent assignment as the global default for `chat_reply`
+4. **Credits ledger + project_credits** — every project gets 0 balance until topped up; system-credit-queue page lets admin top up manually
+5. **Voice transcription endpoint + chat upload UI**
+6. **Chat-reply approval gate** — reuses Part VIII
+7. **Milestone tables + dependency cron**
+8. **Stripe checkout + webhook** — last because it requires Stripe API keys in Railway env
+
+Every step is independently shippable. We can split into two deploys if
+any part needs more bake time.
+
+### Anti-fragility properties Part IX preserves
+
+- Voice transcription routes through Part VI tier ladder — Groq goes paid? swap to OpenAI Whisper, one row
+- LLM agent routing routes through Part VI — Anthropic raises prices? swap to Sonar for chat_reply, one row
+- Stripe goes down? `credit_packages` table can point to alternate processor (PayPlus, PayPal) by changing the checkout route
+- All credit-spending actions write to `credit_ledger` — single source of truth survives any frontend or processor change
+
+---
+
 *Canonical at `aiproxy/ARCHITECTURE_LAYERS.md`. Versioned with the codebase
 so every future session starts from the same stack.*
