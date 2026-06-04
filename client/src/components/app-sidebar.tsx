@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet, GitBranch } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -44,6 +44,7 @@ const adminItemKeys = [
   { titleKey: "admin.agents", url: "/admin/agents", icon: Bot },
   { titleKey: "admin.p9Agents", url: "/agents", icon: Bot },
   { titleKey: "admin.systemQueue", url: "/system-queue", icon: Inbox },
+  { titleKey: "admin.armsDashboard", url: "/admin/arms", icon: GitBranch },
 ];
 
 export function AppSidebar() {

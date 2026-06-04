@@ -404,6 +404,37 @@ async function callProvider(provider: string, model: string, messages: any[], at
   }
 }
 
+// Part X — Direct Groq call for arm AI managers (Tier 1).
+// callProvider does not natively route Groq; arm inference uses the free Groq pool
+// (NOT Base44 — explicitly excluded). Rotates auth_profiles via storage.pickAuthProfile.
+async function callGroqArm(messages: any[], model = "llama-3.3-70b-versatile"): Promise<{ content: string; usage: any }> {
+  const apiKey = process.env.GROQ_API_KEY;
+  // Rotation cue across the 5-entity round-robin pool (label-only; real key from env).
+  const profile = storage.pickAuthProfile("groq");
+  if (profile) storage.incrementProfileUsage(profile.id);
+  if (!apiKey) {
+    return {
+      content: "[Demo] Groq key not configured. Set GROQ_API_KEY to enable arm AI manager replies. (Free Groq pool covers arm inference — not routed through Base44.)",
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    };
+  }
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages, temperature: 0.6, max_tokens: 1500 }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    return {
+      content: data.choices?.[0]?.message?.content || "No response",
+      usage: data.usage || { prompt_tokens: 0, completion_tokens: 0 },
+    };
+  } catch (e: any) {
+    return { content: `Error from groq: ${e.message}`, usage: { prompt_tokens: 0, completion_tokens: 0 } };
+  }
+}
+
 // Generate follow-up suggestions using a cheap model
 async function generateFollowUps(userMessage: string, assistantResponse: string, model: string): Promise<string[]> {
   const settings = await storage.getAllSettings();
@@ -3888,6 +3919,424 @@ export async function registerRoutes(
       console.error("[stripe webhook] error:", e?.message);
       return res.status(500).json({ message: e.message });
     }
+  });
+
+  // =====================================================
+  // PART X — PROJECT ARMS routes
+  // Functional sub-branches per project, each with a named AI manager.
+  // Reuses: agents(scope='arm'), pending_actions (gate, type='arm_instruction'),
+  // credit_ledger, auth_profiles round-robin, Part IX Whisper voice.
+  // =====================================================
+
+  // Pricing (credits)
+  const ARM_PRICE = {
+    chatT1: 1,      // Groq tier-1 chat reply
+    chatT2: 5,      // Claude deep-work
+    voicePerMin: 3, // voice transcription
+    targetDraft: 3, // target instruction draft
+    docAssist: 2,   // document AI-assist
+  };
+
+  // Resolve arm + enforce visibility. Returns { arm, user, isAdmin } or sends an error.
+  async function loadArmForRead(req: Request, res: Response): Promise<{ arm: any; userId: number; isAdmin: boolean } | null> {
+    const userId = (req as any).userId;
+    const user = (await storage.getUser(userId)) as any;
+    const isAdmin = user?.role === "admin";
+    const armId = parseInt(req.params.armId);
+    const arm = storage.getArm(armId);
+    if (!arm) { res.status(404).json({ message: "Arm not found" }); return null; }
+    if (!storage.canViewArm(arm, userId, isAdmin)) {
+      res.status(403).json({ message: "Forbidden" }); return null;
+    }
+    return { arm, userId, isAdmin };
+  }
+
+  // Build the arm AI manager system prompt (agent personality + living doc context).
+  function buildArmSystemPrompt(arm: any, lang: string): string {
+    const agent = storage.getP9Agent(arm.armAgentId);
+    const doc = storage.getArmDocument(arm.id);
+    let docContext = "";
+    if (doc?.currentVersionId) {
+      const v = storage.getArmDocumentVersion(doc.currentVersionId);
+      if (v?.content) docContext = `\n\nCurrent living document ("${doc.title}"):\n${v.content.slice(0, 4000)}`;
+    }
+    const base = agent?.systemPrompt || "You are an operations manager AI.";
+    const langNote = lang === "he" ? "\nRespond in Hebrew unless the user writes in English." : "";
+    return `${base}${langNote}\nYou manage the "${arm.name}" arm of this project. Never send anything outbound without explicit human approval.${docContext}`;
+  }
+
+  // GET /api/projects/:projectId/arms — list visible arms in a project
+  app.get("/api/projects/:projectId/arms", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = (await storage.getUser(userId)) as any;
+      const isAdmin = user?.role === "admin";
+      const projectId = parseInt(req.params.projectId);
+      if (!isAdmin && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      const armsList = storage.listArms(projectId, userId, isAdmin).map((a) => {
+        const agent = storage.getP9Agent(a.armAgentId);
+        return { ...a, agentDisplayName: agent?.displayName ?? null, agentSlug: agent?.slug ?? null };
+      });
+      return res.json(armsList);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/projects/:projectId/arms — create a new arm (project member/admin)
+  app.post("/api/projects/:projectId/arms", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = (await storage.getUser(userId)) as any;
+      const isAdmin = user?.role === "admin";
+      const projectId = parseInt(req.params.projectId);
+      if (!isAdmin && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+      const { name, slug, armAgentId, ownerUserId, visibility } = req.body || {};
+      if (!name || !slug || !armAgentId) {
+        return res.status(400).json({ message: "name, slug, armAgentId required" });
+      }
+      if (storage.getArmBySlug(projectId, slug)) {
+        return res.status(409).json({ message: "An arm with that slug already exists in this project" });
+      }
+      const arm = storage.createArm({
+        projectId, name, slug, armAgentId,
+        ownerUserId: ownerUserId ?? null,
+        visibility: visibility || "owner_private",
+        isActive: true,
+      } as any);
+      storage.ensureArmDocument(arm.id, `How we run ${name}`);
+      storage.logArmActivity({ armId: arm.id, action: "arm_created", metadata: { by: userId } });
+      return res.status(201).json(arm);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/arms/agents — list the 4 arm AI managers (for arm creation UI)
+  // NOTE: registered BEFORE /api/arms/:armId so "agents" is not captured as an armId.
+  app.get("/api/arms/agents", authMiddleware, async (req, res) => {
+    try {
+      const all = storage.listP9Agents().filter((a) => (a as any).scope === "arm");
+      return res.json(all.map((a) => ({ id: a.id, slug: a.slug, displayName: (a as any).displayName, name: a.name })));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/arms/:armId — arm detail (visibility enforced)
+  app.get("/api/arms/:armId", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const agent = storage.getP9Agent(ctx.arm.armAgentId);
+      const doc = storage.getArmDocument(ctx.arm.id);
+      return res.json({ ...ctx.arm, agent: agent ? { id: agent.id, slug: agent.slug, displayName: agent.displayName, systemPrompt: agent.systemPrompt } : null, documentId: doc?.id ?? null });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // PATCH /api/arms/:armId — update arm (owner or admin); supports claiming ownership
+  app.patch("/api/arms/:armId", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      // Only owner or admin can mutate; unassigned arms can be claimed by a project member.
+      const canMutate = ctx.isAdmin || ctx.arm.ownerUserId === ctx.userId
+        || (ctx.arm.ownerUserId == null && storage.isUserInProject(ctx.arm.projectId, ctx.userId));
+      if (!canMutate) return res.status(403).json({ message: "Forbidden" });
+      const { name, ownerUserId, visibility, isActive } = req.body || {};
+      const patch: any = {};
+      if (name !== undefined) patch.name = name;
+      if (ownerUserId !== undefined) patch.ownerUserId = ownerUserId;
+      if (visibility !== undefined) patch.visibility = visibility;
+      if (isActive !== undefined) patch.isActive = isActive;
+      const updated = storage.updateArm(ctx.arm.id, patch);
+      storage.logArmActivity({ armId: ctx.arm.id, action: "arm_updated", metadata: { by: ctx.userId, patch } });
+      return res.json(updated);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/arms/:armId/messages — chat history
+  app.get("/api/arms/:armId/messages", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      return res.json(storage.listArmMessages(ctx.arm.id));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arms/:armId/messages — send a message, get AI manager reply
+  // Body: { content, deepWork?: boolean, lang?: 'en'|'he' }
+  app.post("/api/arms/:armId/messages", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const { content, deepWork, lang } = req.body || {};
+      if (!content || !String(content).trim()) return res.status(400).json({ message: "content required" });
+      const arm = ctx.arm;
+
+      // Store user message
+      storage.createArmMessage({ armId: arm.id, role: "user", content: String(content), authorUserId: ctx.userId } as any);
+
+      // Deduct credits BEFORE inference (T1 Groq=1, T2 Claude deep-work=5)
+      const cost = deepWork ? ARM_PRICE.chatT2 : ARM_PRICE.chatT1;
+      const debit = storage.debitCredits({
+        userId: ctx.userId, projectId: arm.projectId, amount: cost,
+        actionRef: `arm:${arm.id}:chat`, note: `Arm chat (${deepWork ? "T2 deep-work" : "T1"})`,
+      });
+      if (!debit.ok) {
+        return res.status(402).json({ message: "Insufficient credits — queued for approval", queueId: (debit as any).queueId });
+      }
+
+      // Build prompt with personality + living doc context + recent history
+      const sys = buildArmSystemPrompt(arm, lang || "en");
+      const history = storage.listArmMessages(arm.id, 20)
+        .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+      const messages = [{ role: "system", content: sys }, ...history];
+
+      let replyContent = "";
+      let agentId = arm.armAgentId;
+      if (deepWork) {
+        // Tier 2/3 deep work → Claude via callProvider
+        const out = await callProvider("anthropic", "claude-sonnet-4-5", messages);
+        replyContent = out.content;
+      } else {
+        // Tier 1 → Groq free pool (NOT Base44)
+        const out = await callGroqArm(messages);
+        replyContent = out.content;
+      }
+
+      const reply = storage.createArmMessage({ armId: arm.id, role: "assistant", content: replyContent, agentId } as any);
+      storage.logArmActivity({ armId: arm.id, agentId, action: "chat_reply", creditsCost: cost, metadata: { deepWork: !!deepWork } });
+      return res.status(201).json({ reply, creditsCharged: cost, balanceAfter: (debit as any).balanceAfter });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arms/:armId/messages/voice — voice message (Whisper transcription, 3 credits/min)
+  app.post("/api/arms/:armId/messages/voice", authMiddleware, upload.single("audio"), async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const arm = ctx.arm;
+      const f = (req as any).file;
+      if (!f) return res.status(400).json({ message: "audio file required" });
+      const buffer: Buffer = f.buffer || (f.path ? fs.readFileSync(f.path) : null);
+      if (!buffer) return res.status(400).json({ message: "could not read audio" });
+      const mimeType = f.mimetype || "audio/webm";
+      const ext = (mimeType.split("/")[1] || "webm").split(";")[0];
+      const key = `arm-voice/${arm.id}/${Date.now()}_${ctx.userId}.${ext}`;
+      const uploaded = await uploadAudio(buffer, key, mimeType);
+
+      let transcript = "";
+      let durationSec = 0;
+      try {
+        const tr = await transcribeAudio(buffer, mimeType);
+        transcript = tr.text;
+        durationSec = Math.round(tr.durationSec || 0);
+      } catch (e: any) { console.error("[arm voice] transcription failed:", e?.message); }
+
+      // Charge 3 credits/minute (min 1 minute billed)
+      const minutes = Math.max(1, Math.ceil(durationSec / 60));
+      const cost = minutes * ARM_PRICE.voicePerMin;
+      const debit = storage.debitCredits({
+        userId: ctx.userId, projectId: arm.projectId, amount: cost,
+        actionRef: `arm:${arm.id}:voice`, note: `Arm voice transcription (${minutes} min)`,
+      });
+      if (!debit.ok) return res.status(402).json({ message: "Insufficient credits — queued", queueId: (debit as any).queueId });
+
+      const msg = storage.createArmMessage({
+        armId: arm.id, role: "user", content: transcript || "[voice message]",
+        authorUserId: ctx.userId, audioUrl: uploaded.url, transcript: transcript || null,
+      } as any);
+      storage.logArmActivity({ armId: arm.id, action: "voice_transcribed", creditsCost: cost, metadata: { durationSec, minutes } });
+      return res.status(201).json({ message: msg, creditsCharged: cost });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/arms/:armId/document — current living document + current version
+  app.get("/api/arms/:armId/document", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const doc = storage.ensureArmDocument(ctx.arm.id, `How we run ${ctx.arm.name}`);
+      const current = doc.currentVersionId ? storage.getArmDocumentVersion(doc.currentVersionId) : null;
+      const versions = storage.listArmDocumentVersions(doc.id);
+      return res.json({ document: doc, current, versionCount: versions.length });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arms/:armId/document — save a new version. Body: { content, changeNote?, aiAssist?: boolean }
+  app.post("/api/arms/:armId/document", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const arm = ctx.arm;
+      const { content, changeNote, aiAssist, lang } = req.body || {};
+      const doc = storage.ensureArmDocument(arm.id, `How we run ${arm.name}`);
+
+      let finalContent = String(content ?? "");
+      let authorAgentId: number | null = null;
+      if (aiAssist) {
+        // AI-assisted edit: 2 credits, run through Groq with the arm personality
+        const debit = storage.debitCredits({
+          userId: ctx.userId, projectId: arm.projectId, amount: ARM_PRICE.docAssist,
+          actionRef: `arm:${arm.id}:doc_assist`, note: "Arm document AI-assist",
+        });
+        if (!debit.ok) return res.status(402).json({ message: "Insufficient credits — queued", queueId: (debit as any).queueId });
+        const sys = buildArmSystemPrompt(arm, lang || "en");
+        const out = await callGroqArm([
+          { role: "system", content: `${sys}\nYou are revising the living document. Return the full improved markdown document only, no commentary.` },
+          { role: "user", content: `Current draft:\n${finalContent}\n\nImprove, tighten, and structure this document.` },
+        ]);
+        finalContent = out.content;
+        authorAgentId = arm.armAgentId;
+        storage.logArmActivity({ armId: arm.id, agentId: arm.armAgentId, action: "doc_assist", creditsCost: ARM_PRICE.docAssist });
+      }
+
+      const version = storage.createArmDocumentVersion({
+        documentId: doc.id, content: finalContent,
+        authorUserId: aiAssist ? null : ctx.userId, authorAgentId,
+        changeNote: changeNote || (aiAssist ? "AI-assisted revision" : "Manual edit"),
+      });
+      storage.logArmActivity({ armId: arm.id, action: "doc_edit", metadata: { versionId: version.id, versionNumber: version.versionNumber } });
+      return res.status(201).json(version);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/arms/:armId/document/versions — version history
+  app.get("/api/arms/:armId/document/versions", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const doc = storage.getArmDocument(ctx.arm.id);
+      if (!doc) return res.json([]);
+      return res.json(storage.listArmDocumentVersions(doc.id));
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arms/:armId/document/versions/:versionId/restore — restore an old version
+  app.post("/api/arms/:armId/document/versions/:versionId/restore", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const doc = storage.getArmDocument(ctx.arm.id);
+      if (!doc) return res.status(404).json({ message: "No document" });
+      const restored = storage.restoreArmDocumentVersion(doc.id, parseInt(req.params.versionId), ctx.userId);
+      if (!restored) return res.status(404).json({ message: "Version not found" });
+      storage.logArmActivity({ armId: ctx.arm.id, action: "doc_restore", metadata: { newVersionId: restored.id } });
+      return res.json(restored);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/arms/:armId/targets — list targets for an arm
+  app.get("/api/arms/:armId/targets", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const targets = storage.listArmTargets(ctx.arm.id).map((t) => ({
+        ...t, instructions: storage.listArmTargetInstructions(t.id),
+      }));
+      return res.json(targets);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arms/:armId/targets — add a target counterparty
+  app.post("/api/arms/:armId/targets", authMiddleware, async (req, res) => {
+    try {
+      const ctx = await loadArmForRead(req, res); if (!ctx) return;
+      const { name, contactInfo, notes } = req.body || {};
+      if (!name) return res.status(400).json({ message: "name required" });
+      const target = storage.createArmTarget({
+        armId: ctx.arm.id, name,
+        contactInfo: contactInfo ? (typeof contactInfo === "string" ? contactInfo : JSON.stringify(contactInfo)) : null,
+        notes: notes || null, isActive: true,
+      } as any);
+      storage.logArmActivity({ armId: ctx.arm.id, action: "target_added", metadata: { targetId: target.id } });
+      return res.status(201).json(target);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arms/targets/:targetId/generate-instructions
+  // AI-generate an instruction sheet for a target → routed through the approval gate.
+  // 3 credits. Creates a pending_actions row (type='arm_instruction').
+  app.post("/api/arms/targets/:targetId/generate-instructions", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = (await storage.getUser(userId)) as any;
+      const isAdmin = user?.role === "admin";
+      const target = storage.getArmTarget(parseInt(req.params.targetId));
+      if (!target) return res.status(404).json({ message: "Target not found" });
+      const arm = storage.getArm(target.armId);
+      if (!arm || !storage.canViewArm(arm, userId, isAdmin)) return res.status(403).json({ message: "Forbidden" });
+      const { lang, brief } = req.body || {};
+
+      // Charge 3 credits for the draft
+      const debit = storage.debitCredits({
+        userId, projectId: arm.projectId, amount: ARM_PRICE.targetDraft,
+        actionRef: `arm:${arm.id}:target:${target.id}:draft`, note: "Arm target instruction draft",
+      });
+      if (!debit.ok) return res.status(402).json({ message: "Insufficient credits — queued", queueId: (debit as any).queueId });
+
+      const sys = buildArmSystemPrompt(arm, lang || "en");
+      const out = await callGroqArm([
+        { role: "system", content: `${sys}\nYou are drafting an instruction sheet to send to the counterparty "${target.name}". Produce a clear, structured instruction sheet in markdown. This is a DRAFT requiring human approval before sending.` },
+        { role: "user", content: `Counterparty notes: ${target.notes || "(none)"}\nBrief: ${brief || "Draft a standard instruction sheet for this counterparty."}` },
+      ]);
+
+      // Create the instruction (status='draft') and route through Part IX approval gate.
+      const instruction = storage.createArmTargetInstruction({
+        targetId: target.id, generatedByAgentId: arm.armAgentId,
+        content: out.content, status: "draft",
+      } as any);
+      // pending_actions gate (sessionId=0 for web-originated arm actions, like chat_reply)
+      const pending = storage.createPendingAction({
+        sessionId: 0,
+        actionType: "arm_instruction",
+        payload: JSON.stringify({ armId: arm.id, projectId: arm.projectId, targetId: target.id, instructionId: instruction.id, targetName: target.name }),
+        reasoning: `Outbound instruction sheet for "${target.name}" drafted by ${storage.getP9Agent(arm.armAgentId)?.displayName || "arm manager"}. Requires approval before sending.`,
+        status: "pending",
+        createdBy: storage.getP9Agent(arm.armAgentId)?.slug || "arm",
+      } as any);
+      storage.updateArmTargetInstruction(instruction.id, { pendingActionId: pending.id } as any);
+      storage.logArmActivity({ armId: arm.id, agentId: arm.armAgentId, action: "target_instruction_drafted", creditsCost: ARM_PRICE.targetDraft, metadata: { targetId: target.id, instructionId: instruction.id, pendingActionId: pending.id } });
+      return res.status(201).json({ instruction: { ...instruction, pendingActionId: pending.id }, pendingActionId: pending.id });
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arm-instructions/:instructionId/approve — approve a drafted instruction (gate)
+  app.post("/api/arm-instructions/:instructionId/approve", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = (await storage.getUser(userId)) as any;
+      const isAdmin = user?.role === "admin";
+      const instruction = storage.getArmTargetInstruction(parseInt(req.params.instructionId));
+      if (!instruction) return res.status(404).json({ message: "Instruction not found" });
+      const target = storage.getArmTarget(instruction.targetId);
+      const arm = target ? storage.getArm(target.armId) : undefined;
+      if (!arm) return res.status(404).json({ message: "Arm not found" });
+      // Approval gate: only the arm owner or an admin may approve outbound.
+      if (!isAdmin && arm.ownerUserId !== userId) return res.status(403).json({ message: "Only the arm owner or an admin may approve" });
+      const updated = storage.updateArmTargetInstruction(instruction.id, {
+        status: "approved", approvedByUserId: userId, approvedAt: new Date().toISOString(),
+      } as any);
+      if (instruction.pendingActionId) storage.updatePendingActionStatus(instruction.pendingActionId, "approved");
+      storage.logArmActivity({ armId: arm.id, action: "instruction_approved", metadata: { instructionId: instruction.id, by: userId } });
+      return res.json(updated);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/arm-instructions/:instructionId/reject — reject a drafted instruction
+  app.post("/api/arm-instructions/:instructionId/reject", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = (await storage.getUser(userId)) as any;
+      const isAdmin = user?.role === "admin";
+      const instruction = storage.getArmTargetInstruction(parseInt(req.params.instructionId));
+      if (!instruction) return res.status(404).json({ message: "Instruction not found" });
+      const target = storage.getArmTarget(instruction.targetId);
+      const arm = target ? storage.getArm(target.armId) : undefined;
+      if (!arm) return res.status(404).json({ message: "Arm not found" });
+      if (!isAdmin && arm.ownerUserId !== userId) return res.status(403).json({ message: "Only the arm owner or an admin may reject" });
+      const updated = storage.updateArmTargetInstruction(instruction.id, { status: "rejected" } as any);
+      if (instruction.pendingActionId) storage.updatePendingActionStatus(instruction.pendingActionId, "rejected");
+      storage.logArmActivity({ armId: arm.id, action: "instruction_rejected", metadata: { instructionId: instruction.id, by: userId } });
+      return res.json(updated);
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/admin/arms/dashboard — manager dashboard aggregates (admin only)
+  app.get("/api/admin/arms/dashboard", authMiddleware, async (req, res) => {
+    try {
+      if (!(await adminOnly(req, res))) return;
+      return res.json(storage.getArmsDashboard());
+    } catch (e: any) { return res.status(500).json({ message: e.message }); }
   });
 
   return httpServer;

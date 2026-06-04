@@ -1188,6 +1188,9 @@ export const agents = sqliteTable("agents", {
   capabilities: text("capabilities").notNull().default("[]"), // JSON array
   systemPrompt: text("system_prompt").notNull().default(""),
   status: text("status").notNull().default("active"), // active|paused
+  // Part X — reuse agents table for arm AI managers (scope='arm')
+  scope: text("scope").notNull().default("global"), // global | arm
+  displayName: text("display_name"), // e.g. Shira/Maya/Eitan/Noa
   createdAt: text("created_at").notNull().default(new Date().toISOString()),
 });
 export type Agent = typeof agents.$inferSelect;
@@ -1316,3 +1319,110 @@ export const authProfiles = sqliteTable("auth_profiles", {
 export type AuthProfile = typeof authProfiles.$inferSelect;
 export const insertAuthProfileSchema = createInsertSchema(authProfiles).omit({ id: true, createdAt: true, lastUsedAt: true });
 export type InsertAuthProfile = z.infer<typeof insertAuthProfileSchema>;
+
+// =====================================================
+// PART X — PROJECT ARMS (functional sub-branches per project)
+// Named AI managers (Shira/Maya/Eitan/Noa) with living docs, targets,
+// and an approval-gated outbound flow. p10_ prefix avoids collisions.
+// Reuses `agents` (scope='arm'), `pending_actions`, `credit_ledger`,
+// `auth_profiles`, and Part IX voice infra.
+// =====================================================
+
+export const arms = sqliteTable("p10_arms", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(), // kebab-case, unique within a project
+  ownerUserId: integer("owner_user_id"), // human teammate; nullable until assigned
+  armAgentId: integer("arm_agent_id").notNull(), // FK agents (scope='arm')
+  visibility: text("visibility").notNull().default("owner_private"), // owner_private | project_public
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+export type Arm = typeof arms.$inferSelect;
+export const insertArmSchema = createInsertSchema(arms).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertArm = z.infer<typeof insertArmSchema>;
+
+export const armDocuments = sqliteTable("p10_arm_documents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  armId: integer("arm_id").notNull(),
+  title: text("title").notNull(),
+  currentVersionId: integer("current_version_id"), // FK arm_document_versions, nullable
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+export type ArmDocument = typeof armDocuments.$inferSelect;
+export const insertArmDocumentSchema = createInsertSchema(armDocuments).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertArmDocument = z.infer<typeof insertArmDocumentSchema>;
+
+export const armDocumentVersions = sqliteTable("p10_arm_document_versions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  documentId: integer("document_id").notNull(),
+  versionNumber: integer("version_number").notNull(),
+  content: text("content").notNull().default(""), // markdown
+  authorUserId: integer("author_user_id"),
+  authorAgentId: integer("author_agent_id"),
+  changeNote: text("change_note"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ArmDocumentVersion = typeof armDocumentVersions.$inferSelect;
+export const insertArmDocumentVersionSchema = createInsertSchema(armDocumentVersions).omit({ id: true, createdAt: true });
+export type InsertArmDocumentVersion = z.infer<typeof insertArmDocumentVersionSchema>;
+
+export const armTargets = sqliteTable("p10_arm_targets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  armId: integer("arm_id").notNull(),
+  name: text("name").notNull(),
+  contactInfo: text("contact_info"), // JSON {email, phone, telegram, ...}
+  notes: text("notes"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ArmTarget = typeof armTargets.$inferSelect;
+export const insertArmTargetSchema = createInsertSchema(armTargets).omit({ id: true, createdAt: true });
+export type InsertArmTarget = z.infer<typeof insertArmTargetSchema>;
+
+export const armTargetInstructions = sqliteTable("p10_arm_target_instructions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  targetId: integer("target_id").notNull(),
+  generatedByAgentId: integer("generated_by_agent_id").notNull(),
+  content: text("content").notNull().default(""), // markdown
+  status: text("status").notNull().default("draft"), // draft | approved | sent | rejected
+  pendingActionId: integer("pending_action_id"), // FK pending_actions (Part IX gate)
+  approvedByUserId: integer("approved_by_user_id"),
+  approvedAt: text("approved_at"),
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ArmTargetInstruction = typeof armTargetInstructions.$inferSelect;
+export const insertArmTargetInstructionSchema = createInsertSchema(armTargetInstructions).omit({ id: true, createdAt: true, approvedAt: true });
+export type InsertArmTargetInstruction = z.infer<typeof insertArmTargetInstructionSchema>;
+
+export const armMessages = sqliteTable("p10_arm_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  armId: integer("arm_id").notNull(),
+  role: text("role").notNull().default("user"), // user | assistant
+  content: text("content").notNull().default(""),
+  authorUserId: integer("author_user_id"), // user messages
+  agentId: integer("agent_id"), // assistant messages
+  audioUrl: text("audio_url"), // voice (reuses Part IX)
+  transcript: text("transcript"),
+  metadata: text("metadata"), // JSON
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ArmMessage = typeof armMessages.$inferSelect;
+export const insertArmMessageSchema = createInsertSchema(armMessages).omit({ id: true, createdAt: true });
+export type InsertArmMessage = z.infer<typeof insertArmMessageSchema>;
+
+export const armActivityLog = sqliteTable("p10_arm_activity_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  armId: integer("arm_id").notNull(),
+  agentId: integer("agent_id"),
+  action: text("action").notNull(), // chat_reply | doc_edit | target_instruction_drafted | instruction_approved
+  creditsCost: integer("credits_cost").notNull().default(0),
+  metadata: text("metadata"), // JSON
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+export type ArmActivityLog = typeof armActivityLog.$inferSelect;
+export const insertArmActivityLogSchema = createInsertSchema(armActivityLog).omit({ id: true, createdAt: true });
+export type InsertArmActivityLog = z.infer<typeof insertArmActivityLogSchema>;

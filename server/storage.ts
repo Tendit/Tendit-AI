@@ -50,6 +50,14 @@ import {
   type CreditPackage, type InsertCreditPackage, creditPackages,
   type SystemCreditQueue, type InsertSystemCreditQueue, systemCreditQueue,
   type AuthProfile, type InsertAuthProfile, authProfiles,
+  // Part X — Project Arms
+  type Arm, type InsertArm, arms,
+  type ArmDocument, type InsertArmDocument, armDocuments,
+  type ArmDocumentVersion, type InsertArmDocumentVersion, armDocumentVersions,
+  type ArmTarget, type InsertArmTarget, armTargets,
+  type ArmTargetInstruction, type InsertArmTargetInstruction, armTargetInstructions,
+  type ArmMessage, type InsertArmMessage, armMessages,
+  type ArmActivityLog, type InsertArmActivityLog, armActivityLog,
   DEFAULT_SETTINGS, DEFAULT_RATE_LIMITS,
   DEFAULT_AGENT_TOOLS, DEFAULT_AGENT_TOOL_RULES,
 } from "@shared/schema";
@@ -419,6 +427,158 @@ try {
   console.error('[migrate] part IX seed error:', e?.message);
 }
 
+// =====================================================
+// PART X — PROJECT ARMS migrations (idempotent CREATE TABLE IF NOT EXISTS)
+// =====================================================
+// Extend the existing agents table with scope + display_name (arm AI managers).
+for (const sqlStr of [
+  `ALTER TABLE agents ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'`,
+  `ALTER TABLE agents ADD COLUMN display_name TEXT`,
+]) {
+  try { sqlite.exec(sqlStr); } catch { /* column exists; ignore */ }
+}
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS p10_arms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    owner_user_id INTEGER,
+    arm_agent_id INTEGER NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'owner_private',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p10_arm_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    arm_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    current_version_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p10_arm_document_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL,
+    version_number INTEGER NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    author_user_id INTEGER,
+    author_agent_id INTEGER,
+    change_note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p10_arm_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    arm_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    contact_info TEXT,
+    notes TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p10_arm_target_instructions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id INTEGER NOT NULL,
+    generated_by_agent_id INTEGER NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    pending_action_id INTEGER,
+    approved_by_user_id INTEGER,
+    approved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p10_arm_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    arm_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    content TEXT NOT NULL DEFAULT '',
+    author_user_id INTEGER,
+    agent_id INTEGER,
+    audio_url TEXT,
+    transcript TEXT,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS p10_arm_activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    arm_id INTEGER NOT NULL,
+    agent_id INTEGER,
+    action TEXT NOT NULL,
+    credits_cost INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_p10_arms_project_slug ON p10_arms(project_id, slug);
+  CREATE INDEX IF NOT EXISTS idx_p10_arms_project ON p10_arms(project_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arms_owner ON p10_arms(owner_user_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arm_documents_arm ON p10_arm_documents(arm_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arm_doc_versions_doc ON p10_arm_document_versions(document_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arm_targets_arm ON p10_arm_targets(arm_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arm_target_instructions_target ON p10_arm_target_instructions(target_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arm_messages_arm ON p10_arm_messages(arm_id);
+  CREATE INDEX IF NOT EXISTS idx_p10_arm_activity_arm ON p10_arm_activity_log(arm_id);
+`);
+console.log('[migrate] part X arms tables ensured');
+
+// Seed Part X: 4 named arm agents + 4 default arms per project (idempotent).
+try {
+  const ARM_AGENTS: Array<{ slug: string; display: string; prompt: string }> = [
+    { slug: 'arm-shira', display: 'Shira', prompt: "You are Shira, the providers operations manager. You are precise, deadline-driven, and treat every provider relationship as a logistics problem. You draft in clear bullet points. Always lead with timeline, never with price. You never send anything outbound without explicit human approval. You speak Hebrew or English depending on the user's language." },
+    { slug: 'arm-maya', display: 'Maya', prompt: "You are Maya, the marketing operations manager. You are creative-strategic. You ask 'what's the angle?' before 'what's the channel?' You push back on lazy briefs. You have bilingual brand voice instincts (Hebrew + English). You never publish or send anything without human approval." },
+    { slug: 'arm-eitan', display: 'Eitan', prompt: "You are Eitan, the legal operations manager. You are cautious and citation-heavy. You always list the 3 most likely failure modes for any proposed action. You default to risk-mitigation framing. You are NOT a lawyer and you always add a disclaimer when discussing legal matters. You never send communications without explicit approval." },
+    { slug: 'arm-noa', display: 'Noa', prompt: "You are Noa, the finance operations manager. You are numbers-first and ROI-obsessed. You ask 'what's the payback period?' on every spend. You are cold, fast, decisive. You never authorize expenditure without human approval. You answer in tight bullets." },
+  ];
+  const findAgent = sqlite.prepare(`SELECT id FROM agents WHERE slug = ?`);
+  const insertArmAgent = sqlite.prepare(
+    `INSERT INTO agents (name, slug, provider, model, capabilities, system_prompt, status, scope, display_name, created_at)
+     VALUES (@name, @slug, 'groq', 'groq/llama-3.3-70b-versatile', '["chat_reply","doc_assist","target_instructions"]', @prompt, 'active', 'arm', @display, datetime('now'))`
+  );
+  const armAgentIdBySlug: Record<string, number> = {};
+  for (const a of ARM_AGENTS) {
+    const existing = findAgent.get(a.slug) as { id: number } | undefined;
+    if (existing) {
+      armAgentIdBySlug[a.slug] = existing.id;
+    } else {
+      const r = insertArmAgent.run({ name: a.display, slug: a.slug, prompt: a.prompt, display: a.display });
+      armAgentIdBySlug[a.slug] = Number(r.lastInsertRowid);
+    }
+  }
+
+  // 4 default arms per existing project.
+  const ARM_DEFS: Array<{ slug: string; name: string; agentSlug: string; docTitle: string }> = [
+    { slug: 'providers', name: 'Providers', agentSlug: 'arm-shira', docTitle: 'How we talk to providers' },
+    { slug: 'marketing', name: 'Marketing', agentSlug: 'arm-maya', docTitle: 'How we run marketing' },
+    { slug: 'legal', name: 'Legal', agentSlug: 'arm-eitan', docTitle: 'How we handle legal' },
+    { slug: 'finance', name: 'Finance', agentSlug: 'arm-noa', docTitle: 'How we manage finance' },
+  ];
+  const allProjects = sqlite.prepare(`SELECT id FROM projects`).all() as Array<{ id: number }>;
+  const findArm = sqlite.prepare(`SELECT id FROM p10_arms WHERE project_id = ? AND slug = ?`);
+  const insertArm = sqlite.prepare(
+    `INSERT INTO p10_arms (project_id, name, slug, owner_user_id, arm_agent_id, visibility, is_active, created_at, updated_at)
+     VALUES (@projectId, @name, @slug, NULL, @armAgentId, 'owner_private', 1, datetime('now'), datetime('now'))`
+  );
+  const insertDoc = sqlite.prepare(
+    `INSERT INTO p10_arm_documents (arm_id, title, current_version_id, created_at, updated_at)
+     VALUES (@armId, @title, NULL, datetime('now'), datetime('now'))`
+  );
+  let armsCreated = 0;
+  for (const p of allProjects) {
+    for (const def of ARM_DEFS) {
+      if (findArm.get(p.id, def.slug)) continue;
+      const armAgentId = armAgentIdBySlug[def.agentSlug];
+      const r = insertArm.run({ projectId: p.id, name: def.name, slug: def.slug, armAgentId });
+      const armId = Number(r.lastInsertRowid);
+      // Seed an empty living document shell for the arm.
+      insertDoc.run({ armId, title: def.docTitle });
+      armsCreated++;
+    }
+  }
+  console.log(`[migrate] part X seed completed: ${armsCreated} arms created across ${allProjects.length} projects`);
+} catch (e: any) {
+  console.error('[migrate] part X seed error:', e?.message);
+}
+
 export const db = drizzle(sqlite);
 
 export interface IStorage {
@@ -678,6 +838,48 @@ export interface IStorage {
 
   // --- Part IX: Project messages voice helper ---
   transcribeAndStoreVoice(messageId: number, transcript: string): void;
+
+  // =====================================================
+  // PART X — PROJECT ARMS
+  // =====================================================
+  // Arms (visibility-aware reads enforced on every list/get)
+  listArms(projectId: number, requestingUserId: number, isAdmin: boolean): Arm[];
+  getArm(armId: number): Arm | undefined;
+  getArmBySlug(projectId: number, slug: string): Arm | undefined;
+  canViewArm(arm: Arm, requestingUserId: number, isAdmin: boolean): boolean;
+  createArm(data: InsertArm): Arm;
+  updateArm(armId: number, patch: Partial<InsertArm>): Arm | undefined;
+  // Arm chat messages
+  listArmMessages(armId: number, limit?: number): ArmMessage[];
+  createArmMessage(data: InsertArmMessage): ArmMessage;
+  // Living documents + versions
+  getArmDocument(armId: number): ArmDocument | undefined;
+  ensureArmDocument(armId: number, title: string): ArmDocument;
+  listArmDocumentVersions(documentId: number): ArmDocumentVersion[];
+  getArmDocumentVersion(versionId: number): ArmDocumentVersion | undefined;
+  createArmDocumentVersion(args: { documentId: number; content: string; authorUserId?: number | null; authorAgentId?: number | null; changeNote?: string | null }): ArmDocumentVersion;
+  restoreArmDocumentVersion(documentId: number, versionId: number, authorUserId?: number | null): ArmDocumentVersion | undefined;
+  // Targets
+  listArmTargets(armId: number): ArmTarget[];
+  getArmTarget(targetId: number): ArmTarget | undefined;
+  createArmTarget(data: InsertArmTarget): ArmTarget;
+  updateArmTarget(targetId: number, patch: Partial<InsertArmTarget>): ArmTarget | undefined;
+  // Target instructions (approval-gated outbound)
+  listArmTargetInstructions(targetId: number): ArmTargetInstruction[];
+  getArmTargetInstruction(instructionId: number): ArmTargetInstruction | undefined;
+  createArmTargetInstruction(data: InsertArmTargetInstruction): ArmTargetInstruction;
+  updateArmTargetInstruction(instructionId: number, patch: Partial<InsertArmTargetInstruction> & { approvedAt?: string | null }): ArmTargetInstruction | undefined;
+  // Activity log
+  logArmActivity(args: { armId: number; agentId?: number | null; action: string; creditsCost?: number; metadata?: any }): ArmActivityLog;
+  listArmActivity(armId: number, limit?: number): ArmActivityLog[];
+  // Admin dashboard aggregates
+  getArmsDashboard(): {
+    totalArms: number; activeArms: number; ownerlessArms: number;
+    byAgent: Array<{ agentId: number; displayName: string | null; slug: string; armCount: number; messageCount: number; creditsSpent: number }>;
+    pendingInstructions: number;
+    recentActivity: Array<ArmActivityLog & { armName?: string; projectId?: number }>;
+    arms: Array<Arm & { projectName?: string; agentDisplayName?: string | null; ownerEmail?: string | null; messageCount: number; targetCount: number; creditsSpent: number }>;
+  };
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2696,6 +2898,240 @@ export class DatabaseStorage implements IStorage {
   // Update content of an existing project message (used by chat_reply approval flow)
   updateProjectMessageContent(messageId: number, content: string): void {
     db.update(projectMessages).set({ content, isAck: false }).where(eq(projectMessages.id, messageId)).run();
+  }
+
+  // =====================================================
+  // PART X — PROJECT ARMS implementations
+  // =====================================================
+
+  // --- Visibility ---
+  // owner_private: only the assigned owner (or, if unassigned, any admin) may read.
+  // project_public: any project member may read. Admins can always read.
+  canViewArm(arm: Arm, requestingUserId: number, isAdmin: boolean): boolean {
+    if (isAdmin) return true;
+    if (arm.visibility === "project_public") {
+      return this.isUserInProject(arm.projectId, requestingUserId);
+    }
+    // owner_private
+    if (arm.ownerUserId != null) return arm.ownerUserId === requestingUserId;
+    // unassigned owner_private arm: visible to project members (so they can claim it)
+    return this.isUserInProject(arm.projectId, requestingUserId);
+  }
+
+  // --- Arms ---
+  listArms(projectId: number, requestingUserId: number, isAdmin: boolean): Arm[] {
+    const rows = db.select().from(arms)
+      .where(eq(arms.projectId, projectId))
+      .orderBy(arms.id)
+      .all();
+    return rows.filter((a) => this.canViewArm(a, requestingUserId, isAdmin));
+  }
+  getArm(armId: number): Arm | undefined {
+    return db.select().from(arms).where(eq(arms.id, armId)).get();
+  }
+  getArmBySlug(projectId: number, slug: string): Arm | undefined {
+    return db.select().from(arms)
+      .where(and(eq(arms.projectId, projectId), eq(arms.slug, slug))).get();
+  }
+  createArm(data: InsertArm): Arm {
+    const now = new Date().toISOString();
+    return db.insert(arms).values({ ...data, createdAt: now, updatedAt: now }).returning().get();
+  }
+  updateArm(armId: number, patch: Partial<InsertArm>): Arm | undefined {
+    db.update(arms).set({ ...(patch as any), updatedAt: new Date().toISOString() })
+      .where(eq(arms.id, armId)).run();
+    return this.getArm(armId);
+  }
+
+  // --- Arm chat messages ---
+  listArmMessages(armId: number, limit = 100): ArmMessage[] {
+    return db.select().from(armMessages)
+      .where(eq(armMessages.armId, armId))
+      .orderBy(armMessages.id)
+      .limit(limit)
+      .all();
+  }
+  createArmMessage(data: InsertArmMessage): ArmMessage {
+    return db.insert(armMessages).values({
+      ...data, createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+
+  // --- Living documents + versions ---
+  getArmDocument(armId: number): ArmDocument | undefined {
+    return db.select().from(armDocuments).where(eq(armDocuments.armId, armId)).get();
+  }
+  ensureArmDocument(armId: number, title: string): ArmDocument {
+    const existing = this.getArmDocument(armId);
+    if (existing) return existing;
+    const now = new Date().toISOString();
+    return db.insert(armDocuments).values({
+      armId, title, currentVersionId: null, createdAt: now, updatedAt: now,
+    }).returning().get();
+  }
+  listArmDocumentVersions(documentId: number): ArmDocumentVersion[] {
+    return db.select().from(armDocumentVersions)
+      .where(eq(armDocumentVersions.documentId, documentId))
+      .orderBy(desc(armDocumentVersions.versionNumber))
+      .all();
+  }
+  getArmDocumentVersion(versionId: number): ArmDocumentVersion | undefined {
+    return db.select().from(armDocumentVersions).where(eq(armDocumentVersions.id, versionId)).get();
+  }
+  createArmDocumentVersion(args: { documentId: number; content: string; authorUserId?: number | null; authorAgentId?: number | null; changeNote?: string | null }): ArmDocumentVersion {
+    const last = db.select().from(armDocumentVersions)
+      .where(eq(armDocumentVersions.documentId, args.documentId))
+      .orderBy(desc(armDocumentVersions.versionNumber)).get();
+    const nextNum = (last?.versionNumber || 0) + 1;
+    const v = db.insert(armDocumentVersions).values({
+      documentId: args.documentId,
+      versionNumber: nextNum,
+      content: args.content,
+      authorUserId: args.authorUserId ?? null,
+      authorAgentId: args.authorAgentId ?? null,
+      changeNote: args.changeNote ?? null,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+    db.update(armDocuments).set({ currentVersionId: v.id, updatedAt: new Date().toISOString() })
+      .where(eq(armDocuments.id, args.documentId)).run();
+    return v;
+  }
+  restoreArmDocumentVersion(documentId: number, versionId: number, authorUserId?: number | null): ArmDocumentVersion | undefined {
+    const src = this.getArmDocumentVersion(versionId);
+    if (!src || src.documentId !== documentId) return undefined;
+    // Restore creates a new version copying the old content (non-destructive history).
+    return this.createArmDocumentVersion({
+      documentId,
+      content: src.content,
+      authorUserId: authorUserId ?? null,
+      changeNote: `Restored from v${src.versionNumber}`,
+    });
+  }
+
+  // --- Targets ---
+  listArmTargets(armId: number): ArmTarget[] {
+    return db.select().from(armTargets)
+      .where(eq(armTargets.armId, armId))
+      .orderBy(desc(armTargets.id)).all();
+  }
+  getArmTarget(targetId: number): ArmTarget | undefined {
+    return db.select().from(armTargets).where(eq(armTargets.id, targetId)).get();
+  }
+  createArmTarget(data: InsertArmTarget): ArmTarget {
+    return db.insert(armTargets).values({
+      ...data, createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  updateArmTarget(targetId: number, patch: Partial<InsertArmTarget>): ArmTarget | undefined {
+    db.update(armTargets).set(patch as any).where(eq(armTargets.id, targetId)).run();
+    return this.getArmTarget(targetId);
+  }
+
+  // --- Target instructions (approval-gated outbound) ---
+  listArmTargetInstructions(targetId: number): ArmTargetInstruction[] {
+    return db.select().from(armTargetInstructions)
+      .where(eq(armTargetInstructions.targetId, targetId))
+      .orderBy(desc(armTargetInstructions.id)).all();
+  }
+  getArmTargetInstruction(instructionId: number): ArmTargetInstruction | undefined {
+    return db.select().from(armTargetInstructions).where(eq(armTargetInstructions.id, instructionId)).get();
+  }
+  createArmTargetInstruction(data: InsertArmTargetInstruction): ArmTargetInstruction {
+    return db.insert(armTargetInstructions).values({
+      ...data, createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  updateArmTargetInstruction(instructionId: number, patch: Partial<InsertArmTargetInstruction> & { approvedAt?: string | null }): ArmTargetInstruction | undefined {
+    db.update(armTargetInstructions).set(patch as any).where(eq(armTargetInstructions.id, instructionId)).run();
+    return this.getArmTargetInstruction(instructionId);
+  }
+
+  // --- Activity log ---
+  logArmActivity(args: { armId: number; agentId?: number | null; action: string; creditsCost?: number; metadata?: any }): ArmActivityLog {
+    return db.insert(armActivityLog).values({
+      armId: args.armId,
+      agentId: args.agentId ?? null,
+      action: args.action,
+      creditsCost: args.creditsCost ?? 0,
+      metadata: args.metadata != null ? (typeof args.metadata === "string" ? args.metadata : JSON.stringify(args.metadata)) : null,
+      createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  listArmActivity(armId: number, limit = 50): ArmActivityLog[] {
+    return db.select().from(armActivityLog)
+      .where(eq(armActivityLog.armId, armId))
+      .orderBy(desc(armActivityLog.id))
+      .limit(limit).all();
+  }
+
+  // --- Admin dashboard aggregates ---
+  getArmsDashboard() {
+    const allArms = db.select().from(arms).orderBy(arms.projectId, arms.id).all();
+    const allAgents = db.select().from(agents).where(eq(agents.scope, "arm")).all();
+    const agentById = new Map<number, Agent>(allAgents.map((a) => [a.id, a]));
+    const allProjects = db.select().from(projects).all();
+    const projectName = new Map<number, string>(allProjects.map((p) => [p.id, (p as any).name]));
+
+    // Per-arm message + target + credit aggregates
+    const msgCounts = new Map<number, number>();
+    for (const r of db.select().from(armMessages).all()) {
+      msgCounts.set(r.armId, (msgCounts.get(r.armId) || 0) + 1);
+    }
+    const targetCounts = new Map<number, number>();
+    for (const r of db.select().from(armTargets).all()) {
+      targetCounts.set(r.armId, (targetCounts.get(r.armId) || 0) + 1);
+    }
+    const creditByArm = new Map<number, number>();
+    const allActivity = db.select().from(armActivityLog).orderBy(desc(armActivityLog.id)).all();
+    for (const r of allActivity) {
+      creditByArm.set(r.armId, (creditByArm.get(r.armId) || 0) + (r.creditsCost || 0));
+    }
+
+    // Owner emails
+    const ownerEmail = new Map<number, string>();
+    const allUsers = db.select().from(users).all();
+    for (const u of allUsers) ownerEmail.set(u.id, (u as any).email);
+
+    const armName = new Map<number, string>(allArms.map((a) => [a.id, a.name]));
+    const armProject = new Map<number, number>(allArms.map((a) => [a.id, a.projectId]));
+
+    const byAgentMap = new Map<number, { agentId: number; displayName: string | null; slug: string; armCount: number; messageCount: number; creditsSpent: number }>();
+    for (const a of allArms) {
+      const ag = agentById.get(a.armAgentId);
+      const key = a.armAgentId;
+      if (!byAgentMap.has(key)) {
+        byAgentMap.set(key, { agentId: key, displayName: ag?.displayName ?? null, slug: ag?.slug ?? "", armCount: 0, messageCount: 0, creditsSpent: 0 });
+      }
+      const e = byAgentMap.get(key)!;
+      e.armCount += 1;
+      e.messageCount += msgCounts.get(a.id) || 0;
+      e.creditsSpent += creditByArm.get(a.id) || 0;
+    }
+
+    const pendingInstructions = (db.select().from(armTargetInstructions)
+      .where(eq(armTargetInstructions.status, "draft")).all()).length;
+
+    return {
+      totalArms: allArms.length,
+      activeArms: allArms.filter((a) => a.isActive).length,
+      ownerlessArms: allArms.filter((a) => a.ownerUserId == null).length,
+      byAgent: Array.from(byAgentMap.values()),
+      pendingInstructions,
+      recentActivity: allActivity.slice(0, 20).map((r) => ({
+        ...r,
+        armName: armName.get(r.armId),
+        projectId: armProject.get(r.armId),
+      })),
+      arms: allArms.map((a) => ({
+        ...a,
+        projectName: projectName.get(a.projectId),
+        agentDisplayName: agentById.get(a.armAgentId)?.displayName ?? null,
+        ownerEmail: a.ownerUserId != null ? (ownerEmail.get(a.ownerUserId) ?? null) : null,
+        messageCount: msgCounts.get(a.id) || 0,
+        targetCount: targetCounts.get(a.id) || 0,
+        creditsSpent: creditByArm.get(a.id) || 0,
+      })),
+    };
   }
 }
 

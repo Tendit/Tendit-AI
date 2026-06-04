@@ -787,5 +787,98 @@ any part needs more bake time.
 
 ---
 
+## Part X — Project Arms (Functional Sub-Branches with Named AI Managers)
+
+Part X adds **arms** — functional sub-branches inside each project. Where Part IX
+gave us projects, members, credits, and the approval rail, Part X subdivides the
+work *inside* a project into the four functions every operation needs:
+
+| Arm slug    | AI manager | Function                                  |
+|-------------|------------|-------------------------------------------|
+| `providers` | **Shira**  | Sourcing & supplier relationships         |
+| `marketing` | **Maya**   | Demand, content, positioning              |
+| `legal`     | **Eitan**  | Contracts, compliance, risk               |
+| `finance`   | **Noa**    | Budgets, spend, counterparty terms        |
+
+Every project is seeded with all four arms on boot (4 × 11 projects = **44 arms**).
+Each arm is **owned by exactly one teammate** (nullable until claimed), run by one
+named AI manager, and carries a **versioned living instruction document** plus a
+set of **target counterparties** with AI-drafted instruction sheets that flow
+through the Part IX approval gate before they can go outbound.
+
+### What it reuses (extension, not rebuild)
+
+- **AI managers live in the existing `agents` table** with `scope='arm'` and a new
+  `display_name` column — no separate `arm_agents` table. The four managers use
+  `provider='groq'`, `model='groq/llama-3.3-70b-versatile'`.
+- **Tier ladder (Part VI):** tier-1 arm chat replies go through the **Groq free
+  pool** (`callGroqArm`, direct fetch with `auth_profiles` round-robin across the
+  5 entities — **never Base44**). Deep-work replies escalate to Claude
+  (`callProvider('anthropic', ...)`).
+- **Approval gate (Part IX):** outbound target instruction sheets create a
+  `pending_actions` row with `actionType='arm_instruction'` (sessionId=0 for
+  web-originated actions). Only the **arm owner or an admin** may approve/reject.
+- **Credit ledger (Part IX):** every spend writes through `storage.debitCredits`.
+- **Voice (Part IX):** arm voice messages reuse the Whisper transcription path
+  and R2 audio upload.
+
+### Schema (all tables `p10_`-prefixed, autoincrement INTEGER keys)
+
+| Table                         | Purpose                                                        |
+|-------------------------------|----------------------------------------------------------------|
+| `p10_arms`                    | One row per (project, function). Unique index (project_id, slug). Owner, agent, visibility, active flag. |
+| `p10_arm_documents`           | One living document per arm (shell seeded on boot).            |
+| `p10_arm_document_versions`   | Append-only version history; `current_version_id` on document. |
+| `p10_arm_targets`             | Target counterparties for an arm.                             |
+| `p10_arm_target_instructions` | AI-drafted instruction sheets; `pending_action_id` FK → gate.  |
+| `p10_arm_messages`            | Per-arm chat with the AI manager (text + voice).               |
+| `p10_arm_activity_log`        | Audit + credit-cost trail powering the manager dashboard.      |
+
+Migrations are idempotent (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE` in
+try/catch). The seed checks existence before insert and runs on every boot —
+second boot is a verified no-op (0 arms created).
+
+### Visibility
+
+Every read enforces `canViewArm(arm, userId, isAdmin)`: admins see all;
+`project_public` arms are visible to any project member; `owner_private`
+(default) arms are visible only to their owner and admins.
+
+### Pricing (credits)
+
+| Arm action                       | Credits | Notes                              |
+|----------------------------------|---------|------------------------------------|
+| Chat reply (Groq tier-1)         | 1       | `callGroqArm`, free pool           |
+| Deep-work reply (Claude)         | 5       | `callProvider('anthropic', …)`     |
+| Voice transcription              | 3 / min | min 1 minute billed                |
+| Target instruction draft         | 3       | creates the gate row               |
+| Document AI-assist               | 2       | Groq revision of the living doc    |
+
+### Frontend
+
+- **Arms tab** inside project detail (`project-arms.tsx`) — lists visible arms,
+  create form with manager picker.
+- **Arm detail** (`arm-detail.tsx`) — three sub-tabs: **Chat** (text + voice,
+  deep-work toggle), **Living Document** (edit, AI-assist, version history with
+  restore), **Targets** (add target, generate instruction sheet, approve/reject
+  through the gate).
+- **Arms manager dashboard** (`admin-arms-dashboard.tsx`, admin-only) — stat
+  cards (total / active / unassigned / pending), by-manager breakdown, recent
+  activity, and the full cross-project arms table with spend.
+- All strings are i18n'd in Hebrew + English; pages are `dir`/RTL aware.
+
+### Anti-fragility properties Part X preserves
+
+- Arm AI routing rides the Part VI ladder — Groq goes paid? swap the tier-1
+  provider, one place (`callGroqArm` → `callProvider`).
+- Outbound is gated, not autonomous — no instruction sheet leaves without a human
+  owner/admin approval through the same `pending_actions` rail as Part VIII/IX.
+- Every credit-spending arm action writes `p10_arm_activity_log` + `credit_ledger`
+  — the dashboard and billing both read from durable truth.
+
+See `aiproxy/PART_X_TRACE.md` for end-to-end flow traces.
+
+---
+
 *Canonical at `aiproxy/ARCHITECTURE_LAYERS.md`. Versioned with the codebase
 so every future session starts from the same stack.*

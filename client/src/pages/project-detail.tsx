@@ -24,8 +24,9 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, MoreVertical, Users, Calendar, MessageSquare, LayoutDashboard,
   Plus, CheckSquare, Clock, AlertCircle, CheckCircle2, Circle,
-  Send, Pencil, Trash2, UserPlus, MoreHorizontal, RefreshCw, Bot
+  Send, Pencil, Trash2, UserPlus, MoreHorizontal, RefreshCw, Bot, GitBranch
 } from "lucide-react";
+import ProjectArmsTab from "@/pages/project-arms";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1249,6 +1250,9 @@ export default function ProjectDetailPage() {
             <TabsTrigger value="chat" data-testid="tab-chat">
               <MessageSquare className="w-4 h-4 mr-1.5" />{t("projects.chat")}
             </TabsTrigger>
+            <TabsTrigger value="arms" data-testid="tab-arms">
+              <GitBranch className="w-4 h-4 mr-1.5" />{t("arms.tab")}
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview">
@@ -1281,6 +1285,10 @@ export default function ProjectDetailPage() {
               projectId={projectId}
               members={members}
             />
+          </TabsContent>
+
+          <TabsContent value="arms">
+            <ProjectArmsTab projectId={projectId} />
           </TabsContent>
         </Tabs>
       </div>

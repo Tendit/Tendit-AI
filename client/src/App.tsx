@@ -38,6 +38,8 @@ import AgentsPage from "@/pages/agents";
 import CreditsPage from "@/pages/credits";
 import SystemQueuePage from "@/pages/system-queue";
 import ApprovalsPage from "@/pages/approvals";
+import ArmDetailPage from "@/pages/arm-detail";
+import AdminArmsDashboardPage from "@/pages/admin-arms-dashboard";
 import { NotificationBell } from "@/components/notification-bell";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -63,7 +65,9 @@ function AppRouter() {
       <Route path="/admin/crm" component={AdminCRMPage} />
       <Route path="/schedule" component={SchedulePage} />
       <Route path="/projects" component={ProjectsListPage} />
+      <Route path="/projects/:projectId/arms/:armSlug" component={ArmDetailPage} />
       <Route path="/projects/:id" component={ProjectDetailPage} />
+      <Route path="/admin/arms" component={AdminArmsDashboardPage} />
       <Route path="/provider-sessions" component={ProviderSessionsPage} />
       <Route path="/agents" component={AgentsPage} />
       <Route path="/credits" component={CreditsPage} />
