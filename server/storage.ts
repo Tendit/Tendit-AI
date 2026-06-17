@@ -380,7 +380,21 @@ console.log('[migrate] part IX tables ensured');
 try {
   // 1) 11 projects (only insert if slug doesn't exist by name lookup; projects table has no slug column,
   //    so we use name as the natural key for idempotency).
-  const adminRow = sqlite.prepare(`SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1`).get() as { id: number } | undefined;
+  // Ensure an admin user exists FIRST so projects have an owner (was previously a race condition:
+  // admin user was created in routes.ts AFTER this seed ran, so seedOwner was undefined and projects skipped).
+  let adminRow = sqlite.prepare(`SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1`).get() as { id: number } | undefined;
+  if (!adminRow) {
+    try {
+      const result = sqlite.prepare(
+        `INSERT INTO users (username, email, password, role, credits, plan, created_at)
+         VALUES ('admin', 'admin@aiproxy.io', 'pending-bootstrap', 'admin', 99999, 'free', datetime('now'))`
+      ).run();
+      adminRow = { id: Number(result.lastInsertRowid) };
+      console.log('[migrate] bootstrap admin user created for project seed:', result.lastInsertRowid);
+    } catch (e: any) {
+      console.error('[migrate] could not bootstrap admin user:', e?.message);
+    }
+  }
   const seedOwner = adminRow?.id;
   if (seedOwner) {
     const portfolio: Array<{ name: string; description: string; status: string }> = [

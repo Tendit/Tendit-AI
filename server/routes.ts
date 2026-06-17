@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS, buildAgentChatPrompt } from "@shared/schema";
+import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS, buildAgentChatPrompt, users } from "@shared/schema";
 import type { AgentToolConfig, AgentToolRule, PlatformAgent } from "@shared/schema";
 import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from "./calendar-engine";
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
@@ -542,6 +542,13 @@ export async function registerRoutes(
     await storage.createUser({ username: "admin", email: ADMIN_EMAIL, password: hashedPw, role: "admin" });
     await storage.updateUserCredits(1, 99999);
     console.log("Admin user created:", ADMIN_EMAIL);
+  } else if (existingAdmin.password === "pending-bootstrap") {
+    // Bootstrap admin was created early by storage.ts seed (so projects could be owned).
+    // Now we set the real hashed password.
+    const hashedPw = await bcrypt.hash(ADMIN_PASSWORD, 10);
+    await db.update(users).set({ password: hashedPw }).where(eq(users.id, existingAdmin.id));
+    await storage.updateUserCredits(existingAdmin.id, 99999);
+    console.log("Admin user password set:", ADMIN_EMAIL);
   }
 
   // === Seed calendar events ===
