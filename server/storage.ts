@@ -66,8 +66,37 @@ import Database from "better-sqlite3";
 import { eq, desc, and, sql, like, gte, lte, or, isNull } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { CronExpressionParser } from "cron-parser";
+import { existsSync, mkdirSync, copyFileSync } from "fs";
+import { dirname } from "path";
 
-const sqlite = new Database("data.db");
+// Persistent storage: use /data volume in production (Railway), local file otherwise.
+// Falls back gracefully if /data is not writable.
+const DB_PATH = process.env.DB_PATH
+  || (existsSync("/data") ? "/data/data.db" : "data.db");
+
+// Ensure parent directory exists (for /data volume on first boot)
+try {
+  const dir = dirname(DB_PATH);
+  if (dir && dir !== "." && !existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+} catch (e) {
+  console.error("[storage] could not create DB directory", e);
+}
+
+// One-time migration: if we're now using /data but a legacy ./data.db exists
+// from a previous container, copy it over so we don't lose old data.
+try {
+  if (DB_PATH === "/data/data.db" && !existsSync("/data/data.db") && existsSync("./data.db")) {
+    copyFileSync("./data.db", "/data/data.db");
+    console.log("[storage] migrated legacy ./data.db → /data/data.db");
+  }
+} catch (e) {
+  console.error("[storage] legacy migration failed (non-fatal)", e);
+}
+
+console.log(`[storage] opening SQLite at ${DB_PATH}`);
+const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 
 // Idempotent migration: ensure project management tables exist
