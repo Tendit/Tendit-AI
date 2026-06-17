@@ -23,6 +23,34 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Block obvious vulnerability scanner paths early, before logging/routing.
+// Returns 404 with no body so scanners get nothing useful.
+const SCANNER_PATTERNS = [
+  /\.env(\.|$)/i,
+  /\.php($|\?)/i,
+  /phpinfo/i,
+  /wp-(admin|login|config|content|includes)/i,
+  /\/(\.git|\.svn|\.hg|\.aws|\.ssh|\.bash_history)(\/|$)/i,
+  /\/credentials($|\/|\?)/i,
+  /\/(config|secrets?|backup|dump|database|db_backup)\.(json|ya?ml|sql|sqlite|bak|old|zip|tar)/i,
+  /\/api\/v1\/workflows/i,
+  /\/(actuator|jenkins|phpmyadmin|adminer|server-status|server-info)(\/|$)/i,
+  /\/(vendor|node_modules)\//i,
+  /\/(boaform|HNAP1|xmlrpc|cgi-bin)/i,
+  /\.(asp|aspx|jsp|cgi|pl|sh|bak|swp|swo|orig)($|\?)/i,
+];
+
+app.use((req, res, next) => {
+  const url = req.url;
+  for (const pattern of SCANNER_PATTERNS) {
+    if (pattern.test(url)) {
+      res.status(404).end();
+      return;
+    }
+  }
+  next();
+});
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
