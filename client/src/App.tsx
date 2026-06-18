@@ -40,6 +40,7 @@ import SystemQueuePage from "@/pages/system-queue";
 import ApprovalsPage from "@/pages/approvals";
 import ArmDetailPage from "@/pages/arm-detail";
 import AdminArmsDashboardPage from "@/pages/admin-arms-dashboard";
+import BuyPage from "@/pages/buy";
 import { NotificationBell } from "@/components/notification-bell";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -114,6 +115,11 @@ function AppShell() {
   // Allow public invite-accept route without authentication
   if (location.startsWith("/invite/")) {
     return <InviteAcceptPage />;
+  }
+
+  // Public landing page for productized offers (FTO + Pitch Site)
+  if (location === "/buy" || location.startsWith("/buy/")) {
+    return <BuyPage />;
   }
 
   if (isLoading) {

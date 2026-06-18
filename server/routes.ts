@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS, buildAgentChatPrompt, users } from "@shared/schema";
+import { registerSchema, loginSchema, PLANS, MODEL_COSTS, MODELS, ADMIN_EMAIL, ADMIN_PASSWORD, applyMargin, DEFAULT_RATE_LIMITS, AGENT_TOOLS, REAL_TOOLS, buildAgentSystemPrompt, sessions as sessionsTable, MEDIA_COSTS, buildAgentChatPrompt, users, PRODUCT_CATALOG } from "@shared/schema";
 import type { AgentToolConfig, AgentToolRule, PlatformAgent } from "@shared/schema";
 import { seedCalendarEvents, buildTimelineContext, buildTimelinePrompt } from "./calendar-engine";
 import { buildRequestContext, evaluateRules, applyRuleActions, getDefaultRules } from "./rule-engine";
@@ -1285,6 +1285,28 @@ export async function registerRoutes(
 
   // ===== BILLING =====
   app.get("/api/plans", (_req, res) => res.json(PLANS));
+
+  // Public product catalog — used by /buy landing page
+  app.get("/api/products", (_req, res) => {
+    res.json(Object.values(PRODUCT_CATALOG));
+  });
+
+  // Admin: list product orders (paid customers from Stripe Payment Links)
+  app.get("/api/admin/orders", adminMiddleware, async (_req, res) => {
+    try {
+      const { sqlite } = await import("./storage");
+      const rows = sqlite.prepare(
+        `SELECT id, product_sku as productSku, product_name as productName, amount_usd as amountUsd,
+                customer_email as customerEmail, customer_name as customerName,
+                stripe_session_id as stripeSessionId, status, notes,
+                created_at as createdAt, paid_at as paidAt
+         FROM product_orders ORDER BY created_at DESC LIMIT 200`
+      ).all();
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
 
   app.post("/api/billing/subscribe", authMiddleware, async (req, res) => {
     const { plan } = req.body;
@@ -3906,9 +3928,11 @@ export async function registerRoutes(
       } catch (err: any) {
         return res.status(400).json({ message: `Webhook signature verification failed: ${err?.message}` });
       }
-      if (event.type === "checkout.session.completed") {
+      if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
         const session = event.data.object as any;
         const metadata = session.metadata || {};
+
+        // BRANCH A — In-app credit purchases (existing flow)
         const userId = parseInt(metadata.userId || "0");
         const projectId = metadata.projectId ? parseInt(metadata.projectId) : null;
         const credits = parseInt(metadata.credits || "0");
@@ -3920,7 +3944,57 @@ export async function registerRoutes(
           });
           console.log(`[stripe webhook] credited user ${userId} ${credits} credits; settled ${result.settled} overdraft`);
         }
+
+        // BRANCH B — Payment Link product orders (FTO / Pitch Site)
+        // Stripe Payment Links set metadata on the *Price* level via custom metadata in dashboard,
+        // or we match by amount as a fallback since we control the catalog.
+        const amountCents = session.amount_total ?? 0;
+        const customerEmail = session.customer_email || session.customer_details?.email || null;
+        const customerName = session.customer_details?.name || null;
+
+        // Try to identify product: metadata.product_sku (preferred) or amount fallback
+        let sku: string | null = metadata.product_sku || null;
+        if (!sku) {
+          for (const [k, p] of Object.entries(PRODUCT_CATALOG)) {
+            if (p.priceUsd * 100 === amountCents) { sku = k; break; }
+          }
+        }
+        const product = sku ? PRODUCT_CATALOG[sku] : null;
+
+        if (product) {
+          try {
+            const sqliteAny = (storage as any).sqlite || null;
+            // Use raw SQL for portability; storage module exports the better-sqlite3 instance.
+            const db = (await import("./storage")).sqlite;
+            db.prepare(`INSERT OR IGNORE INTO product_orders (product_sku, product_name, amount_usd, customer_email, customer_name, stripe_session_id, stripe_payment_intent_id, status, paid_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', datetime('now'))`).run(
+              product.sku, product.name, product.priceUsd,
+              customerEmail, customerName,
+              session.id, session.payment_intent || null,
+            );
+            console.log(`[stripe webhook] product order recorded: ${product.sku} — ${customerEmail || "no-email"} — $${product.priceUsd}`);
+          } catch (e: any) {
+            console.error(`[stripe webhook] failed to record product order:`, e?.message);
+          }
+        }
       }
+
+      // Refund handling
+      if (event.type === "refund.created") {
+        const refund = event.data.object as any;
+        const paymentIntentId = refund.payment_intent;
+        if (paymentIntentId) {
+          try {
+            const db = (await import("./storage")).sqlite;
+            const r = db.prepare(`UPDATE product_orders SET status = 'refunded' WHERE stripe_payment_intent_id = ?`).run(paymentIntentId);
+            if (r.changes > 0) {
+              console.log(`[stripe webhook] refund recorded for PI ${paymentIntentId}`);
+            }
+          } catch (e: any) {
+            console.error(`[stripe webhook] refund handler error:`, e?.message);
+          }
+        }
+      }
+
       return res.json({ received: true });
     } catch (e: any) {
       console.error("[stripe webhook] error:", e?.message);

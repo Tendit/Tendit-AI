@@ -96,7 +96,7 @@ try {
 }
 
 console.log(`[storage] opening SQLite at ${DB_PATH}`);
-const sqlite = new Database(DB_PATH);
+export const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 
 // Idempotent migration: ensure project management tables exist
@@ -563,6 +563,30 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_p10_arm_activity_arm ON p10_arm_activity_log(arm_id);
 `);
 console.log('[migrate] part X arms tables ensured');
+
+// =====================================================
+// Product Orders (Stripe Payment Links: FTO, Pitch Site)
+// =====================================================
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS product_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_sku TEXT NOT NULL,
+    product_name TEXT NOT NULL,
+    amount_usd INTEGER NOT NULL,
+    customer_email TEXT,
+    customer_name TEXT,
+    stripe_session_id TEXT UNIQUE,
+    stripe_payment_intent_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    paid_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_product_orders_sku ON product_orders(product_sku);
+  CREATE INDEX IF NOT EXISTS idx_product_orders_status ON product_orders(status);
+  CREATE INDEX IF NOT EXISTS idx_product_orders_email ON product_orders(customer_email);
+`);
+console.log('[migrate] product orders table ensured');
 
 // Seed Part X: 4 named arm agents + 4 default arms per project (idempotent).
 try {

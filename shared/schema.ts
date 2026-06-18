@@ -1426,3 +1426,64 @@ export const armActivityLog = sqliteTable("p10_arm_activity_log", {
 export type ArmActivityLog = typeof armActivityLog.$inferSelect;
 export const insertArmActivityLogSchema = createInsertSchema(armActivityLog).omit({ id: true, createdAt: true });
 export type InsertArmActivityLog = z.infer<typeof insertArmActivityLogSchema>;
+
+// =====================================================
+// Product Orders (Stripe Payment Links: FTO, Pitch Site)
+// =====================================================
+export const productOrders = sqliteTable("product_orders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  productSku: text("product_sku").notNull(), // fto_patent_report | pitch_site_deck
+  productName: text("product_name").notNull(),
+  amountUsd: integer("amount_usd").notNull(), // cents
+  customerEmail: text("customer_email"),
+  customerName: text("customer_name"),
+  stripeSessionId: text("stripe_session_id").unique(),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  status: text("status").notNull().default("pending"), // pending | paid | refunded | failed
+  notes: text("notes"), // free-text intake
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+  paidAt: text("paid_at"),
+});
+export type ProductOrder = typeof productOrders.$inferSelect;
+export const insertProductOrderSchema = createInsertSchema(productOrders).omit({ id: true, createdAt: true, paidAt: true });
+export type InsertProductOrder = z.infer<typeof insertProductOrderSchema>;
+
+// Product catalog (single source of truth — Stripe Payment Link URLs)
+export const PRODUCT_CATALOG: Record<string, {
+  sku: string;
+  name: string;
+  description: string;
+  priceUsd: number;
+  stripePaymentLink: string;
+  deliveryDays: number;
+  highlights: string[];
+}> = {
+  fto_patent_report: {
+    sku: "fto_patent_report",
+    name: "FTO Patent Search Report",
+    description: "Comprehensive Freedom-to-Operate analysis with prior art search and risk assessment for your innovation.",
+    priceUsd: 497,
+    stripePaymentLink: "https://buy.stripe.com/bJeeVc1CagED8PZ6s3gYU00",
+    deliveryDays: 5,
+    highlights: [
+      "Prior-art search across USPTO, EPO, WIPO databases",
+      "Independent-claim risk analysis (high/medium/low)",
+      "Design-around opportunities and white-space mapping",
+      "Executive PDF + raw search data delivered in 5 business days",
+    ],
+  },
+  pitch_site_deck: {
+    sku: "pitch_site_deck",
+    name: "VC-Ready Pitch Site + Deck",
+    description: "Investor-ready landing page + 12-slide pitch deck, delivered in 7 business days.",
+    priceUsd: 1997,
+    stripePaymentLink: "https://buy.stripe.com/4gMcN494C9cbfen7w7gYU01",
+    deliveryDays: 7,
+    highlights: [
+      "Custom landing page hosted on your domain",
+      "12-slide investor pitch deck (Sequoia-style narrative)",
+      "Founder positioning + competitive moat copy",
+      "2 revision rounds included, delivered in 7 business days",
+    ],
+  },
+};
