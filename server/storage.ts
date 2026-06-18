@@ -588,6 +588,168 @@ sqlite.exec(`
 `);
 console.log('[migrate] product orders table ensured');
 
+// =====================================================
+// ACTIONS MARKETPLACE — catalog, connections, proposals, executions
+// =====================================================
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS action_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    category TEXT NOT NULL,
+    executor_type TEXT NOT NULL,
+    input_schema TEXT NOT NULL,
+    output_schema TEXT,
+    requires_approval INTEGER NOT NULL DEFAULT 1,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_action_catalog_category ON action_catalog(category);
+  CREATE INDEX IF NOT EXISTS idx_action_catalog_executor ON action_catalog(executor_type);
+
+  CREATE TABLE IF NOT EXISTS project_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    slug TEXT NOT NULL,
+    label TEXT NOT NULL,
+    executor_type TEXT NOT NULL,
+    config TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_connections_project ON project_connections(project_id);
+  CREATE INDEX IF NOT EXISTS idx_project_connections_type ON project_connections(executor_type);
+
+  CREATE TABLE IF NOT EXISTS action_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    arm_id INTEGER,
+    action_slug TEXT NOT NULL,
+    connection_id INTEGER,
+    proposed_by INTEGER NOT NULL,
+    proposed_by_agent TEXT,
+    input TEXT NOT NULL,
+    reasoning TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    approved_by INTEGER,
+    approved_at TEXT,
+    rejected_reason TEXT,
+    execution_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_action_proposals_project ON action_proposals(project_id);
+  CREATE INDEX IF NOT EXISTS idx_action_proposals_status ON action_proposals(status);
+  CREATE INDEX IF NOT EXISTS idx_action_proposals_arm ON action_proposals(arm_id);
+
+  CREATE TABLE IF NOT EXISTS action_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id INTEGER NOT NULL,
+    action_slug TEXT NOT NULL,
+    connection_id INTEGER NOT NULL,
+    request TEXT NOT NULL,
+    response TEXT,
+    status_code INTEGER,
+    success INTEGER NOT NULL,
+    error_message TEXT,
+    duration_ms INTEGER,
+    executed_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_action_executions_proposal ON action_executions(proposal_id);
+  CREATE INDEX IF NOT EXISTS idx_action_executions_success ON action_executions(success);
+`);
+console.log('[migrate] actions marketplace tables ensured');
+
+// Seed action_catalog — the 3 default actions (idempotent)
+try {
+  const seedActions: Array<{ slug: string; name: string; description: string; category: string; executor_type: string; input_schema: string }> = [
+    {
+      slug: 'publish_story',
+      name: 'Publish Story / Article',
+      description: 'Publishes a story or article to a connected website (WordPress, custom CMS, or generic HTTP endpoint). Use this when the user wants to post news, announcements, blog content, or stories.',
+      category: 'content',
+      executor_type: 'http_webhook',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['title', 'body'],
+        properties: {
+          title: { type: 'string', description: 'Story headline', maxLength: 200 },
+          body: { type: 'string', description: 'Full HTML or markdown body of the story' },
+          excerpt: { type: 'string', description: 'Short summary (optional)' },
+          category: { type: 'string', description: 'Category/tag slug (optional)' },
+          featuredImageUrl: { type: 'string', description: 'Cover image URL (optional)' },
+          status: { type: 'string', enum: ['draft', 'publish'], default: 'draft' },
+        },
+      }),
+    },
+    {
+      slug: 'send_whatsapp',
+      name: 'Send WhatsApp Message',
+      description: 'Sends a WhatsApp message to a customer or contact via the connected WhatsApp Business API. Use for follow-ups, notifications, or direct outreach.',
+      category: 'messaging',
+      executor_type: 'http_webhook',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['to', 'message'],
+        properties: {
+          to: { type: 'string', description: 'Recipient phone in E.164 format (e.g. +972501234567)' },
+          message: { type: 'string', description: 'Message body (text)' },
+          templateName: { type: 'string', description: 'Optional WhatsApp template name for marketing messages' },
+        },
+      }),
+    },
+    {
+      slug: 'send_email',
+      name: 'Send Email',
+      description: 'Sends a transactional email via the connected SMTP/SendGrid/Resend service. Use for confirmations, reports, or customer communication.',
+      category: 'messaging',
+      executor_type: 'http_webhook',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['to', 'subject', 'body'],
+        properties: {
+          to: { type: 'string', description: 'Recipient email' },
+          subject: { type: 'string', maxLength: 200 },
+          body: { type: 'string', description: 'HTML or plain text body' },
+          replyTo: { type: 'string', description: 'Reply-to email (optional)' },
+        },
+      }),
+    },
+    {
+      slug: 'create_lead',
+      name: 'Create CRM Lead',
+      description: 'Creates a new lead/contact record in the connected CRM. Use when the AI identifies a potential customer from a conversation or research task.',
+      category: 'crm',
+      executor_type: 'http_webhook',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string' },
+          email: { type: 'string' },
+          phone: { type: 'string' },
+          company: { type: 'string' },
+          notes: { type: 'string' },
+          source: { type: 'string', description: 'Where the lead came from' },
+        },
+      }),
+    },
+  ];
+  const insertAction = sqlite.prepare(
+    `INSERT OR IGNORE INTO action_catalog (slug, name, description, category, executor_type, input_schema)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  );
+  for (const a of seedActions) {
+    insertAction.run(a.slug, a.name, a.description, a.category, a.executor_type, a.input_schema);
+  }
+  console.log(`[seed] action_catalog seeded (${seedActions.length} actions)`);
+} catch (e: any) {
+  console.error('[seed] action_catalog seed failed:', e.message);
+}
+
 // Seed Part X: 4 named arm agents + 4 default arms per project (idempotent).
 try {
   const ARM_AGENTS: Array<{ slug: string; display: string; prompt: string }> = [

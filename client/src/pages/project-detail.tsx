@@ -24,7 +24,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, MoreVertical, Users, Calendar, MessageSquare, LayoutDashboard,
   Plus, CheckSquare, Clock, AlertCircle, CheckCircle2, Circle,
-  Send, Pencil, Trash2, UserPlus, MoreHorizontal, RefreshCw, Bot, GitBranch
+  Send, Pencil, Trash2, UserPlus, MoreHorizontal, RefreshCw, Bot, GitBranch, Zap
 } from "lucide-react";
 import ProjectArmsTab from "@/pages/project-arms";
 
@@ -1206,6 +1206,16 @@ export default function ProjectDetailPage() {
             }`}>
               {project.priority}
             </Badge>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5"
+              onClick={() => navigate(`/projects/${project.id}/actions`)}
+              data-testid="button-project-actions"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span className="text-xs">Actions</span>
+            </Button>
             {isOwner && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>

@@ -1397,6 +1397,349 @@ export async function registerRoutes(
     }
   });
 
+  // ==========================================================================
+  // ACTIONS MARKETPLACE — catalog, connections, proposals, executions
+  // ==========================================================================
+
+  // GET /api/actions/catalog — list available action types (public to all logged-in users)
+  app.get("/api/actions/catalog", authMiddleware, async (_req, res) => {
+    try {
+      const { sqlite } = await import("./storage");
+      const rows = sqlite.prepare(
+        `SELECT id, slug, name, description, category, executor_type as executorType,
+                input_schema as inputSchema, output_schema as outputSchema,
+                requires_approval as requiresApproval, is_active as isActive
+         FROM action_catalog WHERE is_active = 1 ORDER BY category, name`
+      ).all() as any[];
+      // Parse JSON schemas for client convenience
+      for (const r of rows) {
+        try { r.inputSchema = JSON.parse(r.inputSchema); } catch {}
+        if (r.outputSchema) { try { r.outputSchema = JSON.parse(r.outputSchema); } catch {} }
+        r.requiresApproval = !!r.requiresApproval;
+        r.isActive = !!r.isActive;
+      }
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/projects/:id/connections — list connections for a project (members + admin)
+  app.get("/api/projects/:id/connections", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const { sqlite } = await import("./storage");
+      const rows = sqlite.prepare(
+        `SELECT id, project_id as projectId, slug, label, executor_type as executorType,
+                is_active as isActive, created_by as createdBy, created_at as createdAt, updated_at as updatedAt
+         FROM project_connections WHERE project_id = ? ORDER BY created_at DESC`
+      ).all(projectId) as any[];
+      // Never expose config (contains secrets) in list view — only via single GET below for owners
+      res.json(rows.map((r) => ({ ...r, isActive: !!r.isActive })));
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects/:id/connections — create a new connection (project manager/admin)
+  app.post("/api/projects/:id/connections", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can create connections" });
+      }
+      const { slug, label, executorType, config } = req.body || {};
+      if (!slug || !label || !executorType || !config) {
+        return res.status(400).json({ message: "slug, label, executorType, config required" });
+      }
+      const { sqlite } = await import("./storage");
+      try {
+        const r = sqlite.prepare(
+          `INSERT INTO project_connections (project_id, slug, label, executor_type, config, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(projectId, slug, label, executorType, JSON.stringify(config), userId);
+        res.json({ id: r.lastInsertRowid, projectId, slug, label, executorType });
+      } catch (e: any) {
+        if (String(e.message).includes("UNIQUE")) {
+          return res.status(409).json({ message: `Connection with slug '${slug}' already exists for this project` });
+        }
+        throw e;
+      }
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // PATCH /api/projects/:id/connections/:cid — update connection (admin/manager)
+  app.patch("/api/projects/:id/connections/:cid", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const cid = parseInt(req.params.cid);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can update connections" });
+      }
+      const { sqlite } = await import("./storage");
+      const { label, config, isActive } = req.body || {};
+      const updates: string[] = [];
+      const values: any[] = [];
+      if (label != null) { updates.push("label = ?"); values.push(label); }
+      if (config != null) { updates.push("config = ?"); values.push(JSON.stringify(config)); }
+      if (isActive != null) { updates.push("is_active = ?"); values.push(isActive ? 1 : 0); }
+      updates.push("updated_at = datetime('now')");
+      values.push(cid, projectId);
+      sqlite.prepare(
+        `UPDATE project_connections SET ${updates.join(", ")} WHERE id = ? AND project_id = ?`
+      ).run(...values);
+      res.json({ id: cid, updated: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // DELETE /api/projects/:id/connections/:cid — delete connection
+  app.delete("/api/projects/:id/connections/:cid", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const cid = parseInt(req.params.cid);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can delete connections" });
+      }
+      const { sqlite } = await import("./storage");
+      sqlite.prepare(`DELETE FROM project_connections WHERE id = ? AND project_id = ?`).run(cid, projectId);
+      res.json({ deleted: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects/:id/actions/propose — propose an action (from chat / AI / user)
+  app.post("/api/projects/:id/actions/propose", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const { actionSlug, connectionId, input, reasoning, proposedByAgent, armId } = req.body || {};
+      if (!actionSlug || !input) {
+        return res.status(400).json({ message: "actionSlug and input are required" });
+      }
+      const { sqlite } = await import("./storage");
+      const action = sqlite.prepare(`SELECT * FROM action_catalog WHERE slug = ? AND is_active = 1`).get(actionSlug) as any;
+      if (!action) return res.status(404).json({ message: `Unknown action: ${actionSlug}` });
+
+      const r = sqlite.prepare(
+        `INSERT INTO action_proposals (project_id, arm_id, action_slug, connection_id, proposed_by, proposed_by_agent, input, reasoning)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        projectId,
+        armId || null,
+        actionSlug,
+        connectionId || null,
+        userId,
+        proposedByAgent || null,
+        JSON.stringify(input),
+        reasoning || null,
+      );
+      res.json({ id: r.lastInsertRowid, status: "pending", actionSlug, projectId });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/projects/:id/actions/proposals — list pending+recent proposals for a project
+  app.get("/api/projects/:id/actions/proposals", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const status = (req.query.status as string) || null;
+      const { sqlite } = await import("./storage");
+      const where = status ? `WHERE project_id = ? AND status = ?` : `WHERE project_id = ?`;
+      const args: any[] = status ? [projectId, status] : [projectId];
+      const rows = sqlite.prepare(
+        `SELECT p.id, p.project_id as projectId, p.arm_id as armId, p.action_slug as actionSlug,
+                p.connection_id as connectionId, p.proposed_by as proposedBy, p.proposed_by_agent as proposedByAgent,
+                p.input, p.reasoning, p.status, p.approved_by as approvedBy, p.approved_at as approvedAt,
+                p.rejected_reason as rejectedReason, p.execution_id as executionId, p.created_at as createdAt,
+                a.name as actionName, a.category as actionCategory
+         FROM action_proposals p
+         LEFT JOIN action_catalog a ON a.slug = p.action_slug
+         ${where}
+         ORDER BY p.created_at DESC LIMIT 100`
+      ).all(...args) as any[];
+      for (const r of rows) {
+        try { r.input = JSON.parse(r.input); } catch {}
+      }
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/actions/proposals/pending — ALL pending proposals across user's projects (for /approvals page)
+  app.get("/api/actions/proposals/pending", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUser(userId);
+      const isAdmin = user?.role === "admin";
+      const { sqlite } = await import("./storage");
+      // Admin sees all; user sees only their projects
+      const rows = isAdmin
+        ? sqlite.prepare(
+            `SELECT p.id, p.project_id as projectId, p.arm_id as armId, p.action_slug as actionSlug,
+                    p.connection_id as connectionId, p.proposed_by as proposedBy, p.proposed_by_agent as proposedByAgent,
+                    p.input, p.reasoning, p.status, p.created_at as createdAt,
+                    a.name as actionName, a.category as actionCategory,
+                    proj.name as projectName
+             FROM action_proposals p
+             LEFT JOIN action_catalog a ON a.slug = p.action_slug
+             LEFT JOIN projects proj ON proj.id = p.project_id
+             WHERE p.status = 'pending' ORDER BY p.created_at DESC LIMIT 100`
+          ).all()
+        : sqlite.prepare(
+            `SELECT p.id, p.project_id as projectId, p.arm_id as armId, p.action_slug as actionSlug,
+                    p.connection_id as connectionId, p.proposed_by as proposedBy, p.proposed_by_agent as proposedByAgent,
+                    p.input, p.reasoning, p.status, p.created_at as createdAt,
+                    a.name as actionName, a.category as actionCategory,
+                    proj.name as projectName
+             FROM action_proposals p
+             LEFT JOIN action_catalog a ON a.slug = p.action_slug
+             LEFT JOIN projects proj ON proj.id = p.project_id
+             WHERE p.status = 'pending'
+               AND p.project_id IN (
+                 SELECT project_id FROM project_members WHERE user_id = ?
+                 UNION SELECT id FROM projects WHERE owner_id = ?
+               )
+             ORDER BY p.created_at DESC LIMIT 100`
+          ).all(userId, userId) as any[];
+      for (const r of (rows as any[])) {
+        try { r.input = JSON.parse(r.input); } catch {}
+      }
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/actions/proposals/:pid/approve — approve and execute a proposal
+  app.post("/api/actions/proposals/:pid/approve", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const pid = parseInt(req.params.pid);
+      const { connectionId: overrideConnectionId } = req.body || {};
+      const { sqlite } = await import("./storage");
+
+      const prop = sqlite.prepare(`SELECT * FROM action_proposals WHERE id = ?`).get(pid) as any;
+      if (!prop) return res.status(404).json({ message: "Proposal not found" });
+      if (prop.status !== "pending") {
+        return res.status(400).json({ message: `Proposal is ${prop.status}, not pending` });
+      }
+      if (!await canManageProject(prop.project_id, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can approve actions" });
+      }
+
+      const connectionId = overrideConnectionId || prop.connection_id;
+      if (!connectionId) {
+        return res.status(400).json({ message: "No connection selected for this proposal. Provide connectionId in body." });
+      }
+      const conn = sqlite.prepare(`SELECT * FROM project_connections WHERE id = ? AND project_id = ?`).get(connectionId, prop.project_id) as any;
+      if (!conn) return res.status(404).json({ message: "Connection not found" });
+      if (!conn.is_active) return res.status(400).json({ message: "Connection is inactive" });
+
+      const action = sqlite.prepare(`SELECT * FROM action_catalog WHERE slug = ?`).get(prop.action_slug) as any;
+      if (!action) return res.status(404).json({ message: "Action not found in catalog" });
+
+      // Mark approved BEFORE execution to avoid double-runs
+      sqlite.prepare(
+        `UPDATE action_proposals SET status = 'approved', approved_by = ?, approved_at = datetime('now'), connection_id = ? WHERE id = ?`
+      ).run(userId, connectionId, pid);
+
+      // Execute
+      const { executeAction, logExecution } = await import("./action-executor");
+      const config = JSON.parse(conn.config);
+      const input = JSON.parse(prop.input);
+      const result = await executeAction({
+        actionSlug: prop.action_slug,
+        executorType: conn.executor_type,
+        config,
+        input,
+      });
+      const execId = logExecution(pid, prop.action_slug, connectionId, result);
+
+      res.json({
+        proposalId: pid,
+        executionId: execId,
+        success: result.success,
+        statusCode: result.statusCode,
+        response: result.response,
+        errorMessage: result.errorMessage,
+        durationMs: result.durationMs,
+      });
+    } catch (e: any) {
+      console.error("[actions] approve failed:", e);
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/actions/proposals/:pid/reject — reject a proposal
+  app.post("/api/actions/proposals/:pid/reject", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const pid = parseInt(req.params.pid);
+      const { reason } = req.body || {};
+      const { sqlite } = await import("./storage");
+      const prop = sqlite.prepare(`SELECT * FROM action_proposals WHERE id = ?`).get(pid) as any;
+      if (!prop) return res.status(404).json({ message: "Proposal not found" });
+      if (prop.status !== "pending") return res.status(400).json({ message: `Proposal is ${prop.status}` });
+      if (!await canManageProject(prop.project_id, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can reject actions" });
+      }
+      sqlite.prepare(
+        `UPDATE action_proposals SET status = 'rejected', rejected_reason = ?, approved_by = ?, approved_at = datetime('now') WHERE id = ?`
+      ).run(reason || null, userId, pid);
+      res.json({ proposalId: pid, status: "rejected" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/actions/executions/:eid — inspect a single execution audit log
+  app.get("/api/actions/executions/:eid", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const eid = parseInt(req.params.eid);
+      const { sqlite } = await import("./storage");
+      const row = sqlite.prepare(
+        `SELECT e.*, p.project_id as projectId FROM action_executions e
+         JOIN action_proposals p ON p.id = e.proposal_id WHERE e.id = ?`
+      ).get(eid) as any;
+      if (!row) return res.status(404).json({ message: "Execution not found" });
+      const user = await storage.getUser(userId);
+      if (user?.role !== "admin" && !storage.isUserInProject(row.projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      try { row.request = JSON.parse(row.request); } catch {}
+      try { row.response = JSON.parse(row.response); } catch {}
+      row.success = !!row.success;
+      res.json(row);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post("/api/billing/subscribe", authMiddleware, async (req, res) => {
     const { plan } = req.body;
     const userId = (req as any).userId;

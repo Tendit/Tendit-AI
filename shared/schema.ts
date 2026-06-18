@@ -1448,6 +1448,95 @@ export type ProductOrder = typeof productOrders.$inferSelect;
 export const insertProductOrderSchema = createInsertSchema(productOrders).omit({ id: true, createdAt: true, paidAt: true });
 export type InsertProductOrder = z.infer<typeof insertProductOrderSchema>;
 
+// ============================================================================
+// ACTIONS MARKETPLACE — generic framework for AI-proposed external actions
+// ============================================================================
+
+// action_catalog: registry of all available action types (publish_story, send_whatsapp, etc.)
+// Seeded at startup. Each row defines an action SCHEMA (input fields, executor type).
+export const actionCatalog = sqliteTable("action_catalog", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  slug: text("slug").notNull().unique(),                 // e.g. "publish_story", "send_whatsapp"
+  name: text("name").notNull(),                          // e.g. "Publish Story"
+  description: text("description").notNull(),            // What this action does, shown to AI
+  category: text("category").notNull(),                  // "content" | "messaging" | "crm" | "other"
+  executorType: text("executor_type").notNull(),         // "http_webhook" | "wordpress" | "whatsapp" | "email"
+  inputSchema: text("input_schema").notNull(),           // JSON Schema for inputs (validated)
+  outputSchema: text("output_schema"),                   // JSON Schema for output (optional)
+  requiresApproval: integer("requires_approval", { mode: "boolean" }).notNull().default(true),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export type ActionCatalogEntry = typeof actionCatalog.$inferSelect;
+export const insertActionCatalogSchema = createInsertSchema(actionCatalog).omit({ id: true, createdAt: true });
+export type InsertActionCatalogEntry = z.infer<typeof insertActionCatalogSchema>;
+
+// project_connections: per-project credentials/config for executing actions
+// e.g. project 1 (Massive Group) has a "shirhadash_wp" connection with WP URL + token
+export const projectConnections = sqliteTable("project_connections", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  slug: text("slug").notNull(),                          // e.g. "shirhadash_wp", "acme_whatsapp"
+  label: text("label").notNull(),                        // human-readable: "Shirhadash WordPress"
+  executorType: text("executor_type").notNull(),         // matches action_catalog.executorType
+  config: text("config").notNull(),                      // JSON: { baseUrl, authType, token, ... } (encrypted at rest later)
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdBy: integer("created_by").notNull(),            // userId
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export type ProjectConnection = typeof projectConnections.$inferSelect;
+export const insertProjectConnectionSchema = createInsertSchema(projectConnections).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertProjectConnection = z.infer<typeof insertProjectConnectionSchema>;
+
+// action_proposals: AI suggests an action — waits for human approval
+export const actionProposals = sqliteTable("action_proposals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  armId: integer("arm_id"),                              // which arm/agent proposed (nullable for direct calls)
+  actionSlug: text("action_slug").notNull(),             // FK -> action_catalog.slug
+  connectionId: integer("connection_id"),                // FK -> project_connections.id (nullable until chosen)
+  proposedBy: integer("proposed_by").notNull(),          // userId of the chat user OR system
+  proposedByAgent: text("proposed_by_agent"),            // e.g. "Shira", "Maya" (if AI proposed)
+  input: text("input").notNull(),                        // JSON payload matching action_catalog.inputSchema
+  reasoning: text("reasoning"),                          // why AI proposed this
+  status: text("status").notNull().default("pending"),   // pending | approved | rejected | executed | failed
+  approvedBy: integer("approved_by"),                    // userId who approved
+  approvedAt: text("approved_at"),
+  rejectedReason: text("rejected_reason"),
+  executionId: integer("execution_id"),                  // FK -> action_executions.id (after execution)
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export type ActionProposal = typeof actionProposals.$inferSelect;
+export const insertActionProposalSchema = createInsertSchema(actionProposals).omit({
+  id: true, createdAt: true, approvedAt: true, executionId: true,
+});
+export type InsertActionProposal = z.infer<typeof insertActionProposalSchema>;
+
+// action_executions: audit log of actually executed actions
+export const actionExecutions = sqliteTable("action_executions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  proposalId: integer("proposal_id").notNull(),
+  actionSlug: text("action_slug").notNull(),
+  connectionId: integer("connection_id").notNull(),
+  request: text("request").notNull(),                    // JSON: actual HTTP request sent
+  response: text("response"),                            // JSON: response (truncated if huge)
+  statusCode: integer("status_code"),
+  success: integer("success", { mode: "boolean" }).notNull(),
+  errorMessage: text("error_message"),
+  durationMs: integer("duration_ms"),
+  executedAt: text("executed_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export type ActionExecution = typeof actionExecutions.$inferSelect;
+export const insertActionExecutionSchema = createInsertSchema(actionExecutions).omit({ id: true, executedAt: true });
+export type InsertActionExecution = z.infer<typeof insertActionExecutionSchema>;
+
 // Product catalog (single source of truth — Stripe Payment Link URLs)
 export const PRODUCT_CATALOG: Record<string, {
   sku: string;

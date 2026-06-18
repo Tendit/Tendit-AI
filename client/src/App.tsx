@@ -42,6 +42,7 @@ import ArmDetailPage from "@/pages/arm-detail";
 import AdminArmsDashboardPage from "@/pages/admin-arms-dashboard";
 import BuyPage from "@/pages/buy";
 import MyOrdersPage from "@/pages/my-orders";
+import ProjectActionsPage from "@/pages/project-actions";
 import { NotificationBell } from "@/components/notification-bell";
 import { PersonaSwitcher } from "@/components/persona-switcher";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,6 +70,7 @@ function AppRouter() {
       <Route path="/schedule" component={SchedulePage} />
       <Route path="/projects" component={ProjectsListPage} />
       <Route path="/projects/:projectId/arms/:armSlug" component={ArmDetailPage} />
+      <Route path="/projects/:id/actions" component={ProjectActionsPage} />
       <Route path="/projects/:id" component={ProjectDetailPage} />
       <Route path="/admin/arms" component={AdminArmsDashboardPage} />
       <Route path="/provider-sessions" component={ProviderSessionsPage} />
