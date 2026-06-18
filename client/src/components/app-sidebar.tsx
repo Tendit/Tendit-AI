@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet, GitBranch } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet, GitBranch, ShoppingBag } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -28,6 +28,21 @@ const navItemKeys = [
   { titleKey: "nav.schedule", url: "/schedule", icon: Clock },
 ];
 
+// Customer persona — minimal navigation
+const customerNavItems = [
+  { titleKey: "nav.dashboard", url: "/my-orders", icon: ShoppingBag, label: "My Orders" },
+  { titleKey: "nav.billing", url: "/billing", icon: CreditCard, label: "Billing" },
+  { titleKey: "nav.credits", url: "/credits", icon: Wallet, label: "Credits" },
+];
+
+// Agent persona — projects/arms focused
+const agentNavItems = [
+  { titleKey: "nav.projects", url: "/projects", icon: FolderKanban, label: "My Projects" },
+  { titleKey: "nav.chat", url: "/chat", icon: MessageSquare, label: "AI Chat" },
+  { titleKey: "nav.approvals", url: "/approvals", icon: Inbox, label: "Approvals" },
+  { titleKey: "nav.schedule", url: "/schedule", icon: Clock, label: "Schedule" },
+];
+
 const adminItemKeys = [
   { titleKey: "admin.overview", url: "/admin", icon: Shield },
   { titleKey: "admin.users", url: "/admin/users", icon: Users },
@@ -48,9 +63,18 @@ const adminItemKeys = [
 ];
 
 export function AppSidebar() {
-  const { user, logout } = useAuth();
+  const { user, logout, isImpersonating } = useAuth();
   const [location] = useLocation();
   const { t, dir } = useI18n();
+
+  // Determine which nav items to show based on persona
+  const isCustomerPersona = isImpersonating && user?.email === "customer.demo@tendit.io";
+  const isAgentPersona = isImpersonating && user?.email === "agent.demo@tendit.io";
+  const activeNavItems = isCustomerPersona
+    ? customerNavItems.map((i) => ({ titleKey: i.titleKey, url: i.url, icon: i.icon, fallbackLabel: i.label }))
+    : isAgentPersona
+    ? agentNavItems.map((i) => ({ titleKey: i.titleKey, url: i.url, icon: i.icon, fallbackLabel: i.label }))
+    : navItemKeys.map((i) => ({ titleKey: i.titleKey, url: i.url, icon: i.icon, fallbackLabel: undefined as string | undefined }));
 
   return (
     <Sidebar side={dir === "rtl" ? "right" : "left"}>
@@ -69,12 +93,12 @@ export function AppSidebar() {
           <SidebarGroupLabel>{t("common.navigation")}</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItemKeys.map((item) => (
-                <SidebarMenuItem key={item.titleKey}>
+              {activeNavItems.map((item) => (
+                <SidebarMenuItem key={item.url}>
                   <SidebarMenuButton asChild isActive={location === item.url} data-testid={`nav-${item.url.replace("/", "") || "dashboard"}`}>
                     <Link href={item.url}>
                       <item.icon className="w-4 h-4" />
-                      <span>{t(item.titleKey)}</span>
+                      <span>{item.fallbackLabel || t(item.titleKey)}</span>
                     </Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
@@ -82,7 +106,7 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        {user?.role === "admin" && (
+        {user?.role === "admin" && !isImpersonating && (
           <SidebarGroup>
             <SidebarGroupLabel>{t("admin.label")}</SidebarGroupLabel>
             <SidebarGroupContent>

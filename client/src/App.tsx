@@ -41,7 +41,9 @@ import ApprovalsPage from "@/pages/approvals";
 import ArmDetailPage from "@/pages/arm-detail";
 import AdminArmsDashboardPage from "@/pages/admin-arms-dashboard";
 import BuyPage from "@/pages/buy";
+import MyOrdersPage from "@/pages/my-orders";
 import { NotificationBell } from "@/components/notification-bell";
+import { PersonaSwitcher } from "@/components/persona-switcher";
 import { Skeleton } from "@/components/ui/skeleton";
 
 function AppRouter() {
@@ -74,6 +76,7 @@ function AppRouter() {
       <Route path="/credits" component={CreditsPage} />
       <Route path="/system-queue" component={SystemQueuePage} />
       <Route path="/approvals" component={ApprovalsPage} />
+      <Route path="/my-orders" component={MyOrdersPage} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -93,7 +96,8 @@ function AuthenticatedApp() {
         <div className="flex flex-col flex-1 min-w-0">
           <header className={`flex items-center justify-between px-3 py-2 border-b ${dir === "rtl" ? "flex-row-reverse" : ""}`}>
             <SidebarTrigger data-testid="button-sidebar-toggle" />
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-2">
+              <PersonaSwitcher />
               <NotificationBell />
               <LocaleToggle />
               <ThemeToggle />

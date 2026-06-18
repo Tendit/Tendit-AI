@@ -14,16 +14,22 @@ interface AuthContextType {
   user: AuthUser | null;
   token: string | null;
   isLoading: boolean;
+  isImpersonating: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
+  impersonate: (email: string) => Promise<AuthUser>;
+  returnToOriginal: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
 // In-memory token storage (no localStorage in sandboxed iframe)
 let memoryToken: string | null = null;
+// When impersonating, stash the original admin token so we can return to it
+let originalAdminToken: string | null = null;
+let originalAdminUser: AuthUser | null = null;
 
 // Global logout trigger for 401 handling
 let globalLogoutFn: (() => void) | null = null;
@@ -97,8 +103,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => { globalLogoutFn = null; };
   }, [logout]);
 
+  const [isImpersonating, setIsImpersonating] = useState(false);
+
+  const impersonate = useCallback(async (email: string): Promise<AuthUser> => {
+    // Stash original admin token+user the first time
+    if (!originalAdminToken && memoryToken && user) {
+      originalAdminToken = memoryToken;
+      originalAdminUser = user;
+    }
+    const resp = await apiRequest("POST", "/api/admin/impersonate", { email });
+    const data = await resp.json();
+    setAuth(data.token, data.user);
+    setIsImpersonating(true);
+    return data.user;
+  }, [user, setAuth]);
+
+  const returnToOriginal = useCallback(async () => {
+    if (!originalAdminToken || !originalAdminUser) return;
+    setAuth(originalAdminToken, originalAdminUser);
+    originalAdminToken = null;
+    originalAdminUser = null;
+    setIsImpersonating(false);
+  }, [setAuth]);
+
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, token, isLoading, isImpersonating, login, register, logout, refreshUser, impersonate, returnToOriginal }}>
       {children}
     </AuthContext.Provider>
   );

@@ -1291,6 +1291,64 @@ export async function registerRoutes(
     res.json(Object.values(PRODUCT_CATALOG));
   });
 
+  // Customer: list MY product orders (matched by email)
+  app.get("/api/my/orders", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUser(userId);
+      if (!user?.email) return res.json([]);
+      const { sqlite } = await import("./storage");
+      const rows = sqlite.prepare(
+        `SELECT id, product_sku as productSku, product_name as productName, amount_usd as amountUsd,
+                status, notes, created_at as createdAt, paid_at as paidAt
+         FROM product_orders WHERE customer_email = ? ORDER BY created_at DESC`
+      ).all(user.email);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: impersonate another user (returns a new session token for that user)
+  app.post("/api/admin/impersonate", adminMiddleware, async (req, res) => {
+    try {
+      const { email, userId: targetUserId } = req.body || {};
+      let user;
+      if (targetUserId) {
+        user = await storage.getUser(parseInt(targetUserId));
+      } else if (email) {
+        user = await storage.getUserByEmail(email);
+      }
+      if (!user) return res.status(404).json({ message: "User not found" });
+      // Don't allow admins to impersonate other admins (security guardrail)
+      if (user.role === "admin" && user.id !== (req as any).userId) {
+        return res.status(403).json({ message: "Cannot impersonate other admins" });
+      }
+      const newToken = `imp-${Date.now()}-${Math.random().toString(36).slice(2)}-${user.id}`;
+      createSession(newToken, user.id);
+      console.log(`[impersonate] admin ${(req as any).userId} -> user ${user.id} (${user.email})`);
+      return res.json({
+        token: newToken,
+        user: { id: user.id, email: user.email, username: user.username, role: user.role, credits: user.credits, plan: user.plan },
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Admin: list users available for persona switcher (excludes other admins)
+  app.get("/api/admin/personas", adminMiddleware, async (_req, res) => {
+    try {
+      const { sqlite } = await import("./storage");
+      const rows = sqlite.prepare(
+        `SELECT id, email, username, role FROM users WHERE role != 'admin' ORDER BY id ASC LIMIT 50`
+      ).all();
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   // Admin: list product orders (paid customers from Stripe Payment Links)
   app.get("/api/admin/orders", adminMiddleware, async (_req, res) => {
     try {
