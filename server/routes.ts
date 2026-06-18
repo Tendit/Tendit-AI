@@ -1366,6 +1366,37 @@ export async function registerRoutes(
     }
   });
 
+  // Admin: manually create a product order (used for demo seeding + offline sales)
+  app.post("/api/admin/orders", adminMiddleware, async (req, res) => {
+    try {
+      const { productSku, customerEmail, customerName, status, notes } = req.body || {};
+      if (!productSku || !customerEmail) {
+        return res.status(400).json({ message: "productSku and customerEmail required" });
+      }
+      const product = (PRODUCT_CATALOG as any)[productSku];
+      if (!product) return res.status(400).json({ message: `Unknown product sku: ${productSku}` });
+      const { sqlite } = await import("./storage");
+      const result = sqlite.prepare(
+        `INSERT INTO product_orders
+          (product_sku, product_name, amount_usd, customer_email, customer_name, stripe_session_id, status, notes, paid_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        productSku,
+        product.name,
+        product.priceUsd,
+        customerEmail,
+        customerName || null,
+        `manual-${Date.now()}`,
+        status || "paid",
+        notes || "Manually created by admin",
+        (status || "paid") === "paid" ? new Date().toISOString() : null,
+      );
+      res.json({ id: result.lastInsertRowid, productSku, customerEmail });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post("/api/billing/subscribe", authMiddleware, async (req, res) => {
     const { plan } = req.body;
     const userId = (req as any).userId;
