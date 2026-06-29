@@ -43,6 +43,7 @@ import AdminArmsDashboardPage from "@/pages/admin-arms-dashboard";
 import BuyPage from "@/pages/buy";
 import MyOrdersPage from "@/pages/my-orders";
 import ProjectActionsPage from "@/pages/project-actions";
+import SettingsPage from "@/pages/settings";
 import { NotificationBell } from "@/components/notification-bell";
 import { PersonaSwitcher } from "@/components/persona-switcher";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -71,6 +72,7 @@ function AppRouter() {
       <Route path="/projects" component={ProjectsListPage} />
       <Route path="/projects/:projectId/arms/:armSlug" component={ArmDetailPage} />
       <Route path="/projects/:id/actions" component={ProjectActionsPage} />
+      <Route path="/settings" component={SettingsPage} />
       <Route path="/projects/:id" component={ProjectDetailPage} />
       <Route path="/admin/arms" component={AdminArmsDashboardPage} />
       <Route path="/provider-sessions" component={ProviderSessionsPage} />

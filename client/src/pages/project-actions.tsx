@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -15,7 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useI18n } from "@/lib/i18n";
-import { Plug, Plus, Zap, CheckCircle2, XCircle, Clock, AlertCircle, ArrowLeft, Globe, MessageSquare, Mail, Database } from "lucide-react";
+import { Plug, Plus, Zap, CheckCircle2, XCircle, Clock, AlertCircle, ArrowLeft, Globe, MessageSquare, Mail, Database, HardDrive, FolderOpen, FileText, ExternalLink, Link2, Trash2 } from "lucide-react";
 
 type ActionCatalogEntry = {
   id: number;
@@ -99,6 +100,9 @@ export default function ProjectActionsPage() {
           <TabsTrigger value="history" data-testid="tab-history">
             <Clock className="h-4 w-4 mr-1.5" /> History
           </TabsTrigger>
+          <TabsTrigger value="drive" data-testid="tab-drive">
+            <HardDrive className="h-4 w-4 mr-1.5" /> Drive
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="propose">
@@ -109,6 +113,9 @@ export default function ProjectActionsPage() {
         </TabsContent>
         <TabsContent value="history">
           <HistoryTab projectId={projectId} />
+        </TabsContent>
+        <TabsContent value="drive">
+          <DriveTab projectId={projectId} />
         </TabsContent>
       </Tabs>
     </div>
@@ -588,6 +595,277 @@ function HistoryTab({ projectId }: { projectId: number }) {
           </Card>
         );
       })}
+    </div>
+  );
+}
+
+// ============================================================================
+// TAB 4: Google Drive — link folder + browse files + read preview
+// ============================================================================
+interface DriveFolder {
+  id: number;
+  folderId: string;
+  folderName: string;
+  folderUrl: string | null;
+  linkedByUserId: number;
+  label: string | null;
+  createdAt: string;
+}
+interface DriveFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime?: string;
+  webViewLink?: string;
+  size?: string;
+}
+
+function DriveTab({ projectId }: { projectId: number }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [folderInput, setFolderInput] = useState("");
+  const [label, setLabel] = useState("");
+  const [previewFile, setPreviewFile] = useState<DriveFile | null>(null);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const statusQ = useQuery<{ oauthConfigured: boolean; connected: boolean; email: string | null }>({
+    queryKey: ["/api/google/status"],
+  });
+  const folderQ = useQuery<DriveFolder | null>({
+    queryKey: ["/api/projects", projectId, "drive"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/projects/${projectId}/drive`);
+      return r.json();
+    },
+  });
+  const filesQ = useQuery<{ folderId: string | null; folderName: string | null; files: DriveFile[] }>({
+    queryKey: ["/api/projects", projectId, "drive", "files"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/projects/${projectId}/drive/files`);
+      return r.json();
+    },
+    enabled: !!folderQ.data,
+  });
+
+  const linkMut = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("POST", `/api/projects/${projectId}/drive`, {
+        folderUrlOrId: folderInput.trim(),
+        label: label.trim() || undefined,
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Folder linked" });
+      setFolderInput("");
+      setLabel("");
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "drive"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "drive", "files"] });
+    },
+    onError: (e: any) => toast({ title: "Link failed", description: e?.message, variant: "destructive" }),
+  });
+
+  const unlinkMut = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("DELETE", `/api/projects/${projectId}/drive`);
+      return r.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Folder unlinked" });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "drive"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "drive", "files"] });
+    },
+  });
+
+  async function openPreview(file: DriveFile) {
+    setPreviewFile(file);
+    setPreviewText(null);
+    const readable =
+      file.mimeType === "application/vnd.google-apps.document" ||
+      file.mimeType === "application/vnd.google-apps.spreadsheet" ||
+      file.mimeType.startsWith("text/") ||
+      file.mimeType === "application/json";
+    if (!readable) {
+      setPreviewText("(Preview not supported for this file type — open in Drive instead)");
+      return;
+    }
+    setPreviewLoading(true);
+    try {
+      const r = await apiRequest("GET", `/api/projects/${projectId}/drive/files/${file.id}/text`);
+      const data = (await r.json()) as { text: string };
+      setPreviewText(data.text);
+    } catch (e: any) {
+      setPreviewText(`Error: ${e?.message || "failed to read"}`);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  // Google not connected yet?
+  if (statusQ.data && !statusQ.data.connected) {
+    return (
+      <Card>
+        <CardContent className="p-6 space-y-3">
+          <div className="flex items-center gap-2">
+            <HardDrive className="w-5 h-5 text-muted-foreground" />
+            <div className="font-medium">Connect Google to use Drive folders</div>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            You need to authorize your Google account once. After that, you can link any Drive folder to this project — your templates, briefs, and documents will be available to Tendit and the AI agents.
+          </p>
+          <Button asChild data-testid="button-go-settings">
+            <a href="/settings">
+              <ExternalLink className="w-4 h-4 mr-2" /> Go to Settings
+            </a>
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Link folder card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <FolderOpen className="w-4 h-4" /> Linked Drive Folder
+          </CardTitle>
+          <CardDescription>
+            Paste a Google Drive folder URL (or ID). The AI can browse and read files in this folder.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {folderQ.isLoading ? (
+            <Skeleton className="h-16" />
+          ) : folderQ.data ? (
+            <div className="flex items-center justify-between gap-2 p-3 bg-muted/40 rounded">
+              <div className="flex items-center gap-2 min-w-0">
+                <FolderOpen className="w-5 h-5 text-blue-600 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-medium truncate" data-testid="text-folder-name">{folderQ.data.folderName}</div>
+                  {folderQ.data.label && (
+                    <div className="text-xs text-muted-foreground">{folderQ.data.label}</div>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-1 shrink-0">
+                {folderQ.data.folderUrl && (
+                  <Button variant="ghost" size="sm" asChild>
+                    <a href={folderQ.data.folderUrl} target="_blank" rel="noreferrer">
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => unlinkMut.mutate()}
+                  disabled={unlinkMut.isPending}
+                  data-testid="button-unlink-folder"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="folder-url">Folder URL or ID</Label>
+                <Input
+                  id="folder-url"
+                  placeholder="https://drive.google.com/drive/folders/..."
+                  value={folderInput}
+                  onChange={(e) => setFolderInput(e.target.value)}
+                  data-testid="input-folder-url"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="folder-label">Label (optional)</Label>
+                <Input
+                  id="folder-label"
+                  placeholder="e.g. Templates"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                  data-testid="input-folder-label"
+                />
+              </div>
+              <Button
+                onClick={() => linkMut.mutate()}
+                disabled={!folderInput.trim() || linkMut.isPending}
+                data-testid="button-link-folder"
+              >
+                <Link2 className="w-4 h-4 mr-2" /> Link Folder
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Files list */}
+      {folderQ.data && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Files</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {filesQ.isLoading ? (
+              <Skeleton className="h-32" />
+            ) : !filesQ.data?.files?.length ? (
+              <div className="text-sm text-muted-foreground text-center py-8">
+                No files in this folder yet. Upload templates to the linked folder in Google Drive — they&apos;ll appear here.
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {filesQ.data.files.map((f) => (
+                  <div
+                    key={f.id}
+                    className="flex items-center gap-2 p-2 hover:bg-muted/40 rounded cursor-pointer"
+                    onClick={() => openPreview(f)}
+                    data-testid={`file-row-${f.id}`}
+                  >
+                    <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{f.name}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {f.mimeType.split(".").pop() || f.mimeType}
+                        {f.modifiedTime && ` · ${new Date(f.modifiedTime).toLocaleDateString()}`}
+                      </div>
+                    </div>
+                    {f.webViewLink && (
+                      <Button variant="ghost" size="sm" asChild onClick={(e) => e.stopPropagation()}>
+                        <a href={f.webViewLink} target="_blank" rel="noreferrer">
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Preview dialog */}
+      <Dialog open={!!previewFile} onOpenChange={(open) => !open && setPreviewFile(null)}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>{previewFile?.name}</DialogTitle>
+            <DialogDescription>{previewFile?.mimeType}</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-auto">
+            {previewLoading ? (
+              <Skeleton className="h-64" />
+            ) : (
+              <pre className="text-xs bg-muted p-3 rounded whitespace-pre-wrap break-words">
+                {previewText || ""}
+              </pre>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

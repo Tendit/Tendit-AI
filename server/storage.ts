@@ -750,6 +750,114 @@ try {
   console.error('[seed] action_catalog seed failed:', e.message);
 }
 
+// =====================================================
+// GOOGLE OAUTH + DRIVE INTEGRATION
+// =====================================================
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS user_google_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    email TEXT,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+    expires_at INTEGER NOT NULL,
+    scope TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_google_tokens_user ON user_google_tokens(user_id);
+
+  CREATE TABLE IF NOT EXISTS project_drive_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    folder_id TEXT NOT NULL,
+    folder_name TEXT NOT NULL,
+    folder_url TEXT,
+    linked_by_user_id INTEGER NOT NULL,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_drive_folders_project ON project_drive_folders(project_id);
+`);
+console.log('[migrate] google oauth + drive tables ensured');
+
+// Seed Google Drive actions into action_catalog (idempotent)
+try {
+  const driveActions: Array<{ slug: string; name: string; description: string; category: string; executor_type: string; input_schema: string }> = [
+    {
+      slug: 'drive_list_files',
+      name: 'List Drive Files',
+      description: 'Lists files in the project\'s connected Google Drive folder. Use this to discover templates, documents, or assets the user has uploaded for this project.',
+      category: 'files',
+      executor_type: 'google_drive',
+      input_schema: JSON.stringify({
+        type: 'object',
+        properties: {
+          mimeType: { type: 'string', description: 'Optional filter (e.g. application/vnd.google-apps.document)' },
+          query: { type: 'string', description: 'Optional name-contains filter' },
+          pageSize: { type: 'integer', default: 50, maximum: 200 },
+        },
+      }),
+    },
+    {
+      slug: 'drive_read_doc',
+      name: 'Read Google Doc',
+      description: 'Reads the plain-text content of a Google Doc (or any text-readable file) from the project\'s Drive folder. Use this to pull template content, briefs, or reference material for AI tasks.',
+      category: 'files',
+      executor_type: 'google_drive',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['fileId'],
+        properties: {
+          fileId: { type: 'string', description: 'Google Drive file ID' },
+        },
+      }),
+    },
+    {
+      slug: 'drive_create_doc',
+      name: 'Create Google Doc',
+      description: 'Creates a new Google Doc in the project\'s Drive folder with the given title and body. Use this to save AI-generated drafts, reports, or content the user wants kept in their Drive.',
+      category: 'files',
+      executor_type: 'google_drive',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['title', 'body'],
+        properties: {
+          title: { type: 'string', maxLength: 200 },
+          body: { type: 'string', description: 'Plain text body (will become a Google Doc)' },
+        },
+      }),
+    },
+    {
+      slug: 'drive_upload_file',
+      name: 'Upload File to Drive',
+      description: 'Uploads a file (from a URL or base64 content) to the project\'s Drive folder. Use for saving generated PDFs, images, or assets.',
+      category: 'files',
+      executor_type: 'google_drive',
+      input_schema: JSON.stringify({
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', description: 'Filename' },
+          mimeType: { type: 'string', default: 'application/octet-stream' },
+          sourceUrl: { type: 'string', description: 'Download the file from this URL and upload to Drive' },
+          contentBase64: { type: 'string', description: 'OR raw base64 content' },
+        },
+      }),
+    },
+  ];
+  const insertDrive = sqlite.prepare(
+    `INSERT OR IGNORE INTO action_catalog (slug, name, description, category, executor_type, input_schema)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  );
+  for (const a of driveActions) {
+    insertDrive.run(a.slug, a.name, a.description, a.category, a.executor_type, a.input_schema);
+  }
+  console.log(`[seed] drive actions seeded (${driveActions.length})`);
+} catch (e: any) {
+  console.error('[seed] drive actions failed:', e.message);
+}
+
 // Seed Part X: 4 named arm agents + 4 default arms per project (idempotent).
 try {
   const ARM_AGENTS: Array<{ slug: string; display: string; prompt: string }> = [

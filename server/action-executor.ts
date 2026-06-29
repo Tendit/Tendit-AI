@@ -10,6 +10,13 @@
 // The MVP focuses on http_webhook which covers ~80% of integrations.
 
 import { sqlite } from "./storage";
+import {
+  getValidAccessToken,
+  listFolderFiles,
+  readDocAsText,
+  createGoogleDoc,
+  uploadFileToDrive,
+} from "./google-drive";
 
 export interface ConnectionConfig {
   // generic http_webhook
@@ -70,8 +77,10 @@ export async function executeAction(params: {
   executorType: string;
   config: ConnectionConfig;
   input: Record<string, any>;
+  projectId?: number;
+  userId?: number;
 }): Promise<ExecuteResult> {
-  const { executorType, config, input } = params;
+  const { executorType, config, input, projectId, userId, actionSlug } = params;
   const start = Date.now();
 
   try {
@@ -84,6 +93,8 @@ export async function executeAction(params: {
         return await executeWhatsApp(config, input, start);
       case "email":
         return await executeEmail(config, input, start);
+      case "google_drive":
+        return await executeGoogleDrive(actionSlug, input, projectId, userId, start);
       default:
         return {
           success: false,
@@ -291,7 +302,7 @@ async function executeEmail(
 /**
  * Record an execution in the audit log + update the proposal.
  */
-export function logExecution(proposalId: number, actionSlug: string, connectionId: number, result: ExecuteResult): number {
+export function logExecution(proposalId: number, actionSlug: string, connectionId: number | null, result: ExecuteResult): number {
   const insert = sqlite.prepare(
     `INSERT INTO action_executions (proposal_id, action_slug, connection_id, request, response, status_code, success, error_message, duration_ms)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -299,7 +310,7 @@ export function logExecution(proposalId: number, actionSlug: string, connectionI
   const r = insert.run(
     proposalId,
     actionSlug,
-    connectionId,
+    connectionId ?? 0,
     JSON.stringify({ ...result.request, headers: maskHeaders(result.request.headers) }),
     JSON.stringify(result.response ?? null).slice(0, 8000),
     result.statusCode ?? null,
@@ -315,6 +326,147 @@ export function logExecution(proposalId: number, actionSlug: string, connectionI
   ).run(result.success ? "executed" : "failed", execId, proposalId);
 
   return execId;
+}
+
+// ─── Google Drive executor ─────────────────────────────────────────────────
+async function executeGoogleDrive(
+  actionSlug: string,
+  input: Record<string, any>,
+  projectId: number | undefined,
+  userId: number | undefined,
+  start: number
+): Promise<ExecuteResult> {
+  if (!projectId) {
+    return {
+      success: false,
+      request: { url: "google_drive", method: actionSlug, headers: {} },
+      errorMessage: "projectId required for google_drive executor",
+      durationMs: Date.now() - start,
+    };
+  }
+
+  // Find linked folder for this project (use the linking user's token)
+  const folderRow = sqlite
+    .prepare(
+      "SELECT folder_id, folder_name, linked_by_user_id FROM project_drive_folders WHERE project_id = ? ORDER BY id DESC LIMIT 1"
+    )
+    .get(projectId) as
+    | { folder_id: string; folder_name: string; linked_by_user_id: number }
+    | undefined;
+
+  if (!folderRow) {
+    return {
+      success: false,
+      request: { url: "google_drive", method: actionSlug, headers: {} },
+      errorMessage: "No Google Drive folder linked to this project. Link one in Project Settings first.",
+      durationMs: Date.now() - start,
+    };
+  }
+
+  const tokenUserId = folderRow.linked_by_user_id;
+  const accessToken = await getValidAccessToken(sqlite, tokenUserId);
+  if (!accessToken) {
+    return {
+      success: false,
+      request: { url: "google_drive", method: actionSlug, headers: {} },
+      errorMessage: `Google token for user ${tokenUserId} is missing or expired. Re-authorize in Settings.`,
+      durationMs: Date.now() - start,
+    };
+  }
+
+  const folderId = folderRow.folder_id;
+
+  try {
+    switch (actionSlug) {
+      case "drive_list_files": {
+        const files = await listFolderFiles(accessToken, folderId, {
+          mimeType: input.mimeType,
+          query: input.query,
+          pageSize: input.pageSize,
+        });
+        return {
+          success: true,
+          statusCode: 200,
+          request: {
+            url: `drive:folder/${folderId}`,
+            method: "list_files",
+            headers: { Authorization: "Bearer ***" },
+            body: input,
+          },
+          response: { folderId, folderName: folderRow.folder_name, count: files.length, files },
+          durationMs: Date.now() - start,
+        };
+      }
+      case "drive_read_doc": {
+        const text = await readDocAsText(accessToken, input.fileId);
+        return {
+          success: true,
+          statusCode: 200,
+          request: {
+            url: `drive:file/${input.fileId}`,
+            method: "read_doc",
+            headers: { Authorization: "Bearer ***" },
+            body: input,
+          },
+          response: {
+            fileId: input.fileId,
+            length: text.length,
+            text: text.length > 50000 ? text.slice(0, 50000) + "\n...[truncated]" : text,
+          },
+          durationMs: Date.now() - start,
+        };
+      }
+      case "drive_create_doc": {
+        const created = await createGoogleDoc(accessToken, folderId, input.title, input.body);
+        return {
+          success: true,
+          statusCode: 200,
+          request: {
+            url: `drive:folder/${folderId}/create_doc`,
+            method: "create_doc",
+            headers: { Authorization: "Bearer ***" },
+            body: { title: input.title, bodyLength: (input.body || "").length },
+          },
+          response: created,
+          durationMs: Date.now() - start,
+        };
+      }
+      case "drive_upload_file": {
+        const uploaded = await uploadFileToDrive(accessToken, folderId, {
+          name: input.name,
+          mimeType: input.mimeType,
+          sourceUrl: input.sourceUrl,
+          contentBase64: input.contentBase64,
+        });
+        return {
+          success: true,
+          statusCode: 200,
+          request: {
+            url: `drive:folder/${folderId}/upload`,
+            method: "upload_file",
+            headers: { Authorization: "Bearer ***" },
+            body: { name: input.name, mimeType: input.mimeType, hasSourceUrl: !!input.sourceUrl, hasBase64: !!input.contentBase64 },
+          },
+          response: uploaded,
+          durationMs: Date.now() - start,
+        };
+      }
+      default:
+        return {
+          success: false,
+          request: { url: "google_drive", method: actionSlug, headers: {} },
+          errorMessage: `Unknown drive action: ${actionSlug}`,
+          durationMs: Date.now() - start,
+        };
+    }
+  } catch (e: any) {
+    return {
+      success: false,
+      request: { url: `drive:folder/${folderId}`, method: actionSlug, headers: { Authorization: "Bearer ***" }, body: input },
+      errorMessage: e?.message || "Drive call failed",
+      durationMs: Date.now() - start,
+    };
+  }
 }
 
 // Don't store raw auth headers in the audit log

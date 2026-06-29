@@ -1398,6 +1398,218 @@ export async function registerRoutes(
   });
 
   // ==========================================================================
+  // GOOGLE OAUTH + DRIVE INTEGRATION
+  // ==========================================================================
+
+  // GET /api/google/status — is google configured at all + does this user have a token?
+  app.get("/api/google/status", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { sqlite } = await import("./storage");
+      const { isGoogleOAuthConfigured } = await import("./google-drive");
+      const row = sqlite.prepare(
+        "SELECT email, scope, expires_at, updated_at FROM user_google_tokens WHERE user_id = ?"
+      ).get(userId) as { email: string; scope: string; expires_at: number; updated_at: string } | undefined;
+      res.json({
+        oauthConfigured: isGoogleOAuthConfigured(),
+        connected: !!row,
+        email: row?.email || null,
+        scope: row?.scope || null,
+        connectedAt: row?.updated_at || null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/google/oauth/start — kick off OAuth flow
+  app.get("/api/google/oauth/start", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { isGoogleOAuthConfigured, createOAuthState, buildAuthUrl } = await import("./google-drive");
+      if (!isGoogleOAuthConfigured()) {
+        return res.status(503).json({ message: "Google OAuth not configured on server. Admin must set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET." });
+      }
+      const state = createOAuthState(userId);
+      const url = buildAuthUrl(state);
+      res.json({ url });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/google/oauth/callback — Google redirects here
+  app.get("/api/google/oauth/callback", async (req, res) => {
+    try {
+      const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
+      if (error) {
+        return res.redirect(`/settings?google=error&reason=${encodeURIComponent(error)}`);
+      }
+      if (!code || !state) {
+        return res.redirect("/settings?google=error&reason=missing_code_or_state");
+      }
+      const { consumeOAuthState, exchangeCodeForToken, fetchUserEmail, saveUserToken } = await import("./google-drive");
+      const userId = consumeOAuthState(state);
+      if (!userId) return res.redirect("/settings?google=error&reason=invalid_state");
+      const token = await exchangeCodeForToken(code);
+      const email = await fetchUserEmail(token.access_token);
+      const { sqlite } = await import("./storage");
+      saveUserToken(sqlite, userId, token, email);
+      res.redirect("/settings?google=connected");
+    } catch (e: any) {
+      console.error("[google oauth callback]", e);
+      res.redirect(`/settings?google=error&reason=${encodeURIComponent(e?.message || "unknown")}`);
+    }
+  });
+
+  // DELETE /api/google/disconnect — revoke and forget tokens for this user
+  app.delete("/api/google/disconnect", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { sqlite } = await import("./storage");
+      const { deleteUserToken } = await import("./google-drive");
+      deleteUserToken(sqlite, userId);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ─── Project Drive folder linking ─────────────────────────────────────────
+
+  // GET /api/projects/:id/drive — get linked Drive folder (if any)
+  app.get("/api/projects/:id/drive", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const { sqlite } = await import("./storage");
+      const row = sqlite.prepare(
+        "SELECT id, folder_id as folderId, folder_name as folderName, folder_url as folderUrl, linked_by_user_id as linkedByUserId, label, created_at as createdAt FROM project_drive_folders WHERE project_id = ? ORDER BY id DESC LIMIT 1"
+      ).get(projectId);
+      res.json(row || null);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/projects/:id/drive — link a Drive folder to a project
+  // body: { folderUrlOrId: string, label?: string }
+  app.post("/api/projects/:id/drive", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can link a Drive folder" });
+      }
+      const { folderUrlOrId, label } = req.body || {};
+      if (!folderUrlOrId) return res.status(400).json({ message: "folderUrlOrId is required" });
+
+      const { parseDriveFolderId, getValidAccessToken, getFolderMetadata } = await import("./google-drive");
+      const folderId = parseDriveFolderId(folderUrlOrId);
+      if (!folderId) return res.status(400).json({ message: "Could not extract folder ID from input. Paste the full Drive folder URL." });
+
+      const { sqlite } = await import("./storage");
+      const accessToken = await getValidAccessToken(sqlite, userId);
+      if (!accessToken) return res.status(401).json({ message: "Google not connected. Connect in Settings first." });
+
+      const meta = await getFolderMetadata(accessToken, folderId);
+      if (!meta) return res.status(404).json({ message: "Folder not found or not accessible by your Google account" });
+      if (meta.mimeType !== "application/vnd.google-apps.folder") {
+        return res.status(400).json({ message: "That ID is not a folder" });
+      }
+
+      // Remove any existing link (single-folder per project for now)
+      sqlite.prepare("DELETE FROM project_drive_folders WHERE project_id = ?").run(projectId);
+
+      const r = sqlite.prepare(
+        `INSERT INTO project_drive_folders (project_id, folder_id, folder_name, folder_url, linked_by_user_id, label) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(projectId, meta.id, meta.name, meta.webViewLink || null, userId, label || null);
+
+      res.json({
+        id: Number(r.lastInsertRowid),
+        folderId: meta.id,
+        folderName: meta.name,
+        folderUrl: meta.webViewLink,
+        linkedByUserId: userId,
+        label: label || null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // DELETE /api/projects/:id/drive — unlink folder
+  app.delete("/api/projects/:id/drive", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await canManageProject(projectId, userId)) {
+        return res.status(403).json({ message: "Only owner/manager/admin can unlink" });
+      }
+      const { sqlite } = await import("./storage");
+      sqlite.prepare("DELETE FROM project_drive_folders WHERE project_id = ?").run(projectId);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/projects/:id/drive/files — list files in the linked folder (live, no proposal needed)
+  app.get("/api/projects/:id/drive/files", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const { sqlite } = await import("./storage");
+      const folder = sqlite.prepare(
+        "SELECT folder_id, folder_name, linked_by_user_id FROM project_drive_folders WHERE project_id = ? ORDER BY id DESC LIMIT 1"
+      ).get(projectId) as { folder_id: string; folder_name: string; linked_by_user_id: number } | undefined;
+      if (!folder) return res.json({ files: [], folderName: null });
+
+      const { getValidAccessToken, listFolderFiles } = await import("./google-drive");
+      const accessToken = await getValidAccessToken(sqlite, folder.linked_by_user_id);
+      if (!accessToken) return res.status(401).json({ message: "Google token expired for the linking user" });
+
+      const files = await listFolderFiles(accessToken, folder.folder_id, {
+        mimeType: req.query.mimeType as string | undefined,
+        query: req.query.q as string | undefined,
+        pageSize: req.query.pageSize ? parseInt(req.query.pageSize as string) : 50,
+      });
+      res.json({ folderId: folder.folder_id, folderName: folder.folder_name, files });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/projects/:id/drive/files/:fileId/text — read a file as text (live)
+  app.get("/api/projects/:id/drive/files/:fileId/text", authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const projectId = parseInt(req.params.id);
+      if (!await storage.isUserInProject(projectId, userId)) {
+        return res.status(403).json({ message: "Not a member of this project" });
+      }
+      const { sqlite } = await import("./storage");
+      const folder = sqlite.prepare(
+        "SELECT linked_by_user_id FROM project_drive_folders WHERE project_id = ? ORDER BY id DESC LIMIT 1"
+      ).get(projectId) as { linked_by_user_id: number } | undefined;
+      if (!folder) return res.status(404).json({ message: "No Drive folder linked" });
+      const { getValidAccessToken, readDocAsText } = await import("./google-drive");
+      const accessToken = await getValidAccessToken(sqlite, folder.linked_by_user_id);
+      if (!accessToken) return res.status(401).json({ message: "Google token expired" });
+      const text = await readDocAsText(accessToken, req.params.fileId);
+      res.json({ fileId: req.params.fileId, length: text.length, text });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ==========================================================================
   // ACTIONS MARKETPLACE — catalog, connections, proposals, executions
   // ==========================================================================
 
@@ -1651,16 +1863,27 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Only owner/manager/admin can approve actions" });
       }
 
-      const connectionId = overrideConnectionId || prop.connection_id;
-      if (!connectionId) {
-        return res.status(400).json({ message: "No connection selected for this proposal. Provide connectionId in body." });
-      }
-      const conn = sqlite.prepare(`SELECT * FROM project_connections WHERE id = ? AND project_id = ?`).get(connectionId, prop.project_id) as any;
-      if (!conn) return res.status(404).json({ message: "Connection not found" });
-      if (!conn.is_active) return res.status(400).json({ message: "Connection is inactive" });
-
       const action = sqlite.prepare(`SELECT * FROM action_catalog WHERE slug = ?`).get(prop.action_slug) as any;
       if (!action) return res.status(404).json({ message: "Action not found in catalog" });
+
+      // For google_drive executor, the "connection" is the linked Drive folder, not a project_connections row
+      const isDrive = action.executor_type === "google_drive";
+
+      let connectionId: number | null = null;
+      let executorType: string = action.executor_type;
+      let config: any = {};
+
+      if (!isDrive) {
+        connectionId = overrideConnectionId || prop.connection_id;
+        if (!connectionId) {
+          return res.status(400).json({ message: "No connection selected for this proposal. Provide connectionId in body." });
+        }
+        const conn = sqlite.prepare(`SELECT * FROM project_connections WHERE id = ? AND project_id = ?`).get(connectionId, prop.project_id) as any;
+        if (!conn) return res.status(404).json({ message: "Connection not found" });
+        if (!conn.is_active) return res.status(400).json({ message: "Connection is inactive" });
+        executorType = conn.executor_type;
+        config = JSON.parse(conn.config);
+      }
 
       // Mark approved BEFORE execution to avoid double-runs
       sqlite.prepare(
@@ -1669,13 +1892,14 @@ export async function registerRoutes(
 
       // Execute
       const { executeAction, logExecution } = await import("./action-executor");
-      const config = JSON.parse(conn.config);
       const input = JSON.parse(prop.input);
       const result = await executeAction({
         actionSlug: prop.action_slug,
-        executorType: conn.executor_type,
+        executorType,
         config,
         input,
+        projectId: prop.project_id,
+        userId,
       });
       const execId = logExecution(pid, prop.action_slug, connectionId, result);
 

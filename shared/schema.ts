@@ -1537,6 +1537,36 @@ export type ActionExecution = typeof actionExecutions.$inferSelect;
 export const insertActionExecutionSchema = createInsertSchema(actionExecutions).omit({ id: true, executedAt: true });
 export type InsertActionExecution = z.infer<typeof insertActionExecutionSchema>;
 
+// ─── Google OAuth integration ────────────────────────────────────────────────
+// user_google_tokens: per-user OAuth tokens (Drive, etc.)
+export const userGoogleTokens = sqliteTable("user_google_tokens", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().unique(),
+  email: text("email"),                                  // Google account email
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token"),                   // may be null on re-auth without prompt=consent
+  expiresAt: integer("expires_at").notNull(),            // unix ms
+  scope: text("scope"),                                  // space-separated granted scopes
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+export type UserGoogleToken = typeof userGoogleTokens.$inferSelect;
+
+// project_drive_folders: link a Google Drive folder to a project
+export const projectDriveFolders = sqliteTable("project_drive_folders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  folderId: text("folder_id").notNull(),                 // Google Drive folder ID
+  folderName: text("folder_name").notNull(),
+  folderUrl: text("folder_url"),                         // webViewLink
+  linkedByUserId: integer("linked_by_user_id").notNull(),// whose OAuth token to use
+  label: text("label"),                                  // optional friendly label (e.g. "Templates")
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+export type ProjectDriveFolder = typeof projectDriveFolders.$inferSelect;
+export const insertProjectDriveFolderSchema = createInsertSchema(projectDriveFolders).omit({ id: true, createdAt: true });
+export type InsertProjectDriveFolder = z.infer<typeof insertProjectDriveFolderSchema>;
+
 // Product catalog (single source of truth — Stripe Payment Link URLs)
 export const PRODUCT_CATALOG: Record<string, {
   sku: string;
