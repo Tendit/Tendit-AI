@@ -40,7 +40,11 @@ export default function SettingsPage() {
     }
   }, []);
 
-  const statusQ = useQuery<GoogleStatus>({ queryKey: ["/api/google/status"] });
+  const statusQ = useQuery<GoogleStatus>({
+    queryKey: ["/api/google/status"],
+    staleTime: 0,
+    refetchOnMount: "always",
+  });
 
   const connectMut = useMutation({
     mutationFn: async () => {
