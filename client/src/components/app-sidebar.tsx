@@ -1,4 +1,4 @@
-import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet, GitBranch, ShoppingBag } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Key, CreditCard, LogOut, Shield, Users, Settings2, DollarSign, ShieldAlert, CalendarDays, Brain, Activity, BrainCircuit, Coins, Rocket, Bot, Clock, Database, FolderKanban, Globe, Inbox, Wallet, GitBranch, ShoppingBag, Settings } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -26,6 +26,7 @@ const navItemKeys = [
   { titleKey: "nav.credits", url: "/credits", icon: Wallet },
   { titleKey: "nav.approvals", url: "/approvals", icon: Inbox },
   { titleKey: "nav.schedule", url: "/schedule", icon: Clock },
+  { titleKey: "nav.settings", url: "/settings", icon: Settings },
 ];
 
 // Customer persona — minimal navigation
@@ -33,6 +34,7 @@ const customerNavItems = [
   { titleKey: "nav.dashboard", url: "/my-orders", icon: ShoppingBag, label: "My Orders" },
   { titleKey: "nav.billing", url: "/billing", icon: CreditCard, label: "Billing" },
   { titleKey: "nav.credits", url: "/credits", icon: Wallet, label: "Credits" },
+  { titleKey: "nav.settings", url: "/settings", icon: Settings, label: "Settings" },
 ];
 
 // Agent persona — projects/arms focused
@@ -41,6 +43,7 @@ const agentNavItems = [
   { titleKey: "nav.chat", url: "/chat", icon: MessageSquare, label: "AI Chat" },
   { titleKey: "nav.approvals", url: "/approvals", icon: Inbox, label: "Approvals" },
   { titleKey: "nav.schedule", url: "/schedule", icon: Clock, label: "Schedule" },
+  { titleKey: "nav.settings", url: "/settings", icon: Settings, label: "Settings" },
 ];
 
 const adminItemKeys = [

@@ -317,6 +317,7 @@ const translations: Record<Locale, Record<string, string>> = {
     // Part IX — multi-project ops
     "nav.credits": "Credits",
     "nav.approvals": "Approvals",
+    "nav.settings": "Settings",
     "admin.p9Agents": "Agents (P9)",
     "admin.systemQueue": "System Queue",
     "credits.title": "Credits",
@@ -739,6 +740,7 @@ const translations: Record<Locale, Record<string, string>> = {
     // Part IX — multi-project ops
     "nav.credits": "קרדיטים",
     "nav.approvals": "אישורים",
+    "nav.settings": "הגדרות",
     "admin.p9Agents": "סוכנים (P9)",
     "admin.systemQueue": "תור מערכת",
     "credits.title": "קרדיטים",
